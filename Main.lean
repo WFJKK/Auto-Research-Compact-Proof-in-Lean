@@ -1,5 +1,6 @@
 import CompactCheck.Json
 import CompactCheck.Semantics
+import CompactCheck.CountedCheck
 
 /-!
 # The `compactcheck` program
@@ -23,6 +24,11 @@ import CompactCheck.Semantics
         The outcome of every leaf of the proof's split tree, in the tree's
         order: its box, its rule, and whether it is certified. For comparing
         with the Python checker leaf by leaf.
+
+    compactcheck cost <network.json> <proof.json>
+        Check a proof and bill it under cost-v3 (CountedCheck.lean): the last
+        line is {"certified": n, "length": total, "by_category": {...}}, or
+        {"status": "rejected", "reason": ...}. Linear networks only, for now.
 
     compactcheck floats <network.json> <inputs.json>
         The logits for each input computed in floats with the spec's
@@ -134,8 +140,33 @@ def runFloats (netPath inputsPath : String) : IO UInt32 := do
   IO.println (Json.arr rows.toArray).compress
   return 0
 
+def runCost (netPath proofPath : String) : IO UInt32 := do
+  let net ← loadNetwork netPath
+  let proofJson ← readJson proofPath
+  let fail (e : String) : IO UInt32 := do
+    IO.println (Json.mkObj [("status", Json.str "rejected"), ("reason", Json.str e)]).compress
+    return 0
+  if net.general then return ← fail "the counted checker covers linear networks only, for now"
+  let limit := maxScalars (shapeSize net.task.space)
+  let nScalars := countScalars proofJson
+  if nScalars > limit then return ← fail s!"the proof file has more than {limit} numbers and strings"
+  match parseProof proofJson net.names with
+  | .error e => fail e
+  | .ok proof =>
+    if proof.network != net.network then return ← fail s!"the proof names network {proof.network}, not {net.network}"
+    match checkProofCounted net.graph net.weights net.task proof nScalars with
+    | none =>
+      match checkProof net.graph net.weights net.task proof with
+      | .error e => fail e
+      | .ok _ => fail "the bill could not be computed"
+    | some (n, c) =>
+      IO.println (Json.mkObj [("certified", Lean.toJson n), ("length", Lean.toJson c.total),
+        ("by_category", Json.mkObj (c.map fun (k, v) => (k, Lean.toJson v)))]).compress
+      return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
+  | ["cost", net, proof] => runCost net proof
   | ["brute", net] => runBrute net
   | ["logits", net, inputs] => runLogits net inputs
   | ["floats", net, inputs] => runFloats net inputs
@@ -144,5 +175,5 @@ def main (args : List String) : IO UInt32 := do
   | _ =>
     IO.eprintln ("usage: compactcheck <network.json> <proof.json> | brute <network.json> | " ++
       "logits <network.json> <inputs.json> | leaves <network.json> <proof.json> | " ++
-      "floats <network.json> <inputs.json>")
+      "cost <network.json> <proof.json> | floats <network.json> <inputs.json>")
     return 2
