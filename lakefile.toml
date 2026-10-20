@@ -21,3 +21,8 @@ name = "CompactCheck"
 [[lean_exe]]
 name = "compactcheck"
 root = "Main"
+
+[[lean_exe]]
+name = "acceptcheck"
+root = "AcceptMain"
+supportInterpreter = true
