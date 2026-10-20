@@ -195,6 +195,9 @@ def main() -> None:
                                 or (expect and py["status"] != expect)):
                             problems.append(f"{cname}: Python {py['status']} {py['certified']}, Lean {ln}")
 
+            if COST_MISMATCHES:
+                problems.append(f"{len(COST_MISMATCHES)} bills differ from the Python length: " + "; ".join(COST_MISMATCHES[:3]))
+                COST_MISMATCHES.clear()
             status = "ok" if not problems else "DIFFERS: " + "; ".join(problems)
             by_larger = certified.get("intervals by larger token")
             by_larger_c = contracted.get("intervals by larger token, contracted")
@@ -205,14 +208,30 @@ def main() -> None:
                   + (f", contracted {by_larger_c})" if by_larger_c is not None else (")" if by_larger is not None else ""))
                   + f", {status}", flush=True)
             failures += bool(problems)
+    print(f"bills compared with the Python length: {COST_COMPARED}", flush=True)
     sys.exit(1 if failures else 0)
 
 
+COST_MISMATCHES: list[str] = []
+COST_COMPARED = 0
+
+
 def check_both(check_proof, folder, nid: str, net: Path, tmp: Path, proof: dict) -> tuple[dict, dict]:
-    """The Python checker's result and the Lean checker's last line, for one proof."""
+    """The Python checker's result and the Lean checker's last line, for one proof. When both accept the
+    proof, `compactcheck cost` is run too and its bill compared with the Python length, category by category
+    (the reproduction of cost-v3, CountedCheck.lean); a difference is recorded in COST_MISMATCHES."""
+    global COST_COMPARED
     py = check_proof(proof, folder, nid)
     (tmp / "proof.json").write_text(json.dumps(proof))
-    return py, lean(str(net), str(tmp / "proof.json"))
+    ln = lean(str(net), str(tmp / "proof.json"))
+    if py["status"] == "ok" and ln.get("status", "ok") == "ok":
+        cost = lean("cost", str(net), str(tmp / "proof.json"))
+        COST_COMPARED += 1
+        by_py = {k: v for k, v in (py.get("length_by_rule") or {}).items() if v}
+        by_lean = {k: v for k, v in (cost.get("by_category") or {}).items() if v}
+        if cost.get("status", "ok") != "ok" or cost.get("length") != py["length"] or by_py != by_lean:
+            COST_MISMATCHES.append(f"{nid}: Python {py['length']} {by_py}, Lean {cost}")
+    return py, ln
 
 
 # Proof trees -----------------------------------------------------------------

@@ -274,57 +274,66 @@ def intervalCost (g : Graph) (w : Weights Rat) (box : Box) (l : Nat) (approx : O
     Python checker would reject the proof (`checkProof` rejects it too). `nScalars` is the proof file's
     number of numbers, strings and booleans (`countScalars`). -/
 def proofCost (g : Graph) (w : Weights Rat) (task : Task) (proof : ProofFile) (nScalars : Nat) :
-    Option Cost := do
+    Except String Cost := do
   let c : Cost := [("read", nScalars), ("extract", paramCount w)]
-  -- contractions, applied one by one so that later chains see the contracted graph
-  let (g', w', contractC) ← (proof.contractions.foldlM (init := (g, w, 0)) fun (g, w, acc) chain => do
-    let cc ← contractCost g w chain
-    match contractAll g w [chain] with
-    | .ok (g', w') => some (g', w', acc + cc)
-    | .error _ => none)
+  -- contractions, applied one by one as `contractAll` applies them, so that later chains see the
+  -- contracted graph; each chain is billed on the graph it meets
+  let (g', w', _, _, contractC) ← proof.contractions.foldlM (init := (g, w, ([] : List Nat), 0, 0))
+    fun (g, w, removed, step, acc) chain => do
+      let some cc := contractCost g w chain | throw "contract: the chain's shapes could not be read"
+      match contractOne g w removed step chain with
+      | .ok (g', w', removed') => pure (g', w', removed', step + 1, acc + cc)
+      | .error e => throw s!"contract: {e}"
   let c := c.add "contract" contractC
   -- approximations
   let approxs ← match buildApproxs g' w' proof.approximations with
-    | .ok as => some as
-    | .error _ => none
+    | .ok as => pure as
+    | .error e => throw s!"approximate: {e}"
   let raws := proof.approximations.map (·.form)
   let approxC := (List.zip approxs raws).foldl (fun acc (a, raw) => acc + approxBuildCost a.W raw) 0
   let c := c.add "approximate" approxC
   -- the tree
   let c := c.add "tree" proof.tree.nodeCount
   let leaves ← match walk proof.tree (rootBox task.space) with
-    | .ok ls => some ls
-    | .error _ => none
-  let singleC ← singleCost g' w'
+    | .ok ls => pure ls
+    | .error e => throw s!"tree: {e}"
   let withRaw (name : String) : Option (Approx × RawForm) :=
     (List.zip approxs raws).find? (·.1.name == name)
   let (c, accepted) ← leaves.foldlM (init := (c, 0)) fun (c, accepted) leaf => do
     match leaf.rule with
-    | .skip => some (c, accepted)
+    | .skip => pure (c, accepted)
     | .single =>
-      let x ← boxInput leaf.box
+      let some x := boxInput leaf.box | throw "single: the leaf holds more than one input"
+      let some singleC := singleCost g' w' | throw "single: the forward pass could not be billed"
       let ok := singleOk g' w' task x
-      some (c.add "single" singleC, if ok then accepted + 1 else accepted)
+      pure (c.add "single" singleC, if ok then accepted + 1 else accepted)
     | .interval name =>
       match task.constantLabel leaf.box with
-      | none => some (c, accepted)
+      | none => pure (c, accepted)
       | some l =>
         let a ← match name with
-          | none => some none
-          | some n => (withRaw n).map some
-        let ic ← intervalCost g' w' leaf.box l a
+          | none => pure none
+          | some n =>
+            match withRaw n with
+            | some ar => pure (some ar)
+            | none => throw s!"interval: unknown approximation {n}"
+        let some ic := intervalCost g' w' leaf.box l a
+          | throw s!"interval: the leaf {repr leaf.box} could not be billed"
         let ok := match leafOk g' w' task approxs leaf with
           | .ok b => b
           | .error _ => false
-        some (c.add "interval" ic, if ok then accepted + 1 else accepted)
+        pure (c.add "interval" ic, if ok then accepted + 1 else accepted)
   let c := if proof.symmetry then c.add "symmetry" accepted else c
-  some c
+  pure c
 
 /-- The checker with its bill: `checkProof`'s count, and the proof's length under `cost-v3`. -/
 def checkProofCounted (g : Graph) (w : Weights Rat) (task : Task) (proof : ProofFile) (nScalars : Nat) :
-    Option (Nat × Cost) :=
-  match checkProof g w task proof, proofCost g w task proof nScalars with
-  | .ok n, some c => some (n, c)
-  | _, _ => none
+    Except String (Nat × Cost) :=
+  match checkProof g w task proof with
+  | .error e => .error e
+  | .ok n =>
+    match proofCost g w task proof nScalars with
+    | .ok c => .ok (n, c)
+    | .error e => .error s!"the bill could not be computed: {e}"
 
 end CompactCheck

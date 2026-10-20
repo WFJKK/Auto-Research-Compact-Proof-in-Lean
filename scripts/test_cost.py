@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reproduction of cost-v3: `compactcheck cost` against the Python checker on proof files of real runs.
 
-    python3 scripts/test_cost.py <pipeline repo> <run folder> [<run folder> ...] [--limit N] [--log FILE]
+    python3 scripts/test_cost.py <pipeline repo> <run folder> [<run folder> ...] [--limit N] [--only TEXT] [--log FILE]
 
 For every proof file of the runs' development networks (round_*/attempt_*/proofs/<network>__<knob>.json.gz),
 runs the Python checker (core.check.checker.check_proof, the current cost model) and `compactcheck cost`, and
@@ -32,6 +32,7 @@ def main() -> int:
     ap.add_argument("repo", type=Path)
     ap.add_argument("runs", type=Path, nargs="+")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--only", default="", help="only records whose id contains this text")
     ap.add_argument("--log", type=Path, default=Path("cost-compare.jsonl"))
     args = ap.parse_args()
     repo = args.repo.resolve()
@@ -58,6 +59,8 @@ def main() -> int:
                 continue
             rec = json.loads(line)
             if rec.get("status") != "ok" or rec["network"] not in dev or rec["record_id"] in done:
+                continue
+            if args.only and args.only not in rec["record_id"]:
                 continue
             gz = run / f"round_{rec['round']:03d}" / f"attempt_{rec['attempt']}" / "proofs" / f"{rec['network']}__{knob_label(rec)}.json.gz"
             if not gz.exists():

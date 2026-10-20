@@ -155,11 +155,8 @@ def runCost (netPath proofPath : String) : IO UInt32 := do
   | .ok proof =>
     if proof.network != net.network then return ← fail s!"the proof names network {proof.network}, not {net.network}"
     match checkProofCounted net.graph net.weights net.task proof nScalars with
-    | none =>
-      match checkProof net.graph net.weights net.task proof with
-      | .error e => fail e
-      | .ok _ => fail "the bill could not be computed"
-    | some (n, c) =>
+    | .error e => fail e
+    | .ok (n, c) =>
       IO.println (Json.mkObj [("certified", Lean.toJson n), ("length", Lean.toJson c.total),
         ("by_category", Json.mkObj (c.map fun (k, v) => (k, Lean.toJson v)))]).compress
       return 0
