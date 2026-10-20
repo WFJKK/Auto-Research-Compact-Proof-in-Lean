@@ -1,0 +1,24 @@
+import Mathlib
+
+/-!
+Vectors and matrices over the rationals, with the operations the checker
+needs. Everything is exact: no rounding anywhere.
+-/
+namespace CompactCheck
+
+/-- A vector: a list of exact rational numbers. -/
+abbrev Vec := List Rat
+
+/-- A matrix: a list of rows. Shape (out, in) means `out` rows, each of
+    length `in`, like the weight of a torch `nn.Linear`. -/
+abbrev Mat := List Vec
+
+
+def vecAdd : Vec -> Vec -> Vec
+ | first1 :: rest1 , first2 :: rest2 => (first1 + first2) :: vecAdd rest1 rest2
+ | _,_ =>[]
+
+
+
+
+end CompactCheck
