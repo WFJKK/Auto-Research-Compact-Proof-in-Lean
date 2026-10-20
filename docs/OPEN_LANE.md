@@ -58,9 +58,9 @@ Every scored proof has the shape the example `examples/open_lane/max2_tiny_brute
 that never mentions the weights (a checker `D` and the theorem `D w ≤ numCorrect graph w task` for all
 `w`) and a specific layer that evaluates `D` on the protected weights. In the example `D` is brute force
 and the kernel evaluates it on all 64 inputs of a tiny network (`tests/max2_tiny` in the pipeline). A proof
-in this shape is verified; to get a length as well, `D` is written in the counted language
-(`docs/COUNTED.md`), as `examples/open_lane/max2_tiny_scored` does, and the manifest's `scored` block
-names the checker, its soundness theorem and its instance.
+in this shape is verified; to get a length as well, `D` is written in the counted language as a function
+of the interpreter (`docs/COUNTED.md`), as `examples/open_lane/max2_tiny_scored` does, and the manifest's
+`scored` block names the checker, its soundness theorem and its instance.
 
 ## Kinds of submission
 

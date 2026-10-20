@@ -1,14 +1,26 @@
 import CompactCheck.CountedCheck
 
 /-!
-# Counted operations: the checker's rules as charged primitives
+# The counted language, as an interface: a checker is written for every interpreter
 
-Operations a scored checker may use besides the arithmetic of `Counted.lean`: each one runs a piece of
-the existing checker (whose soundness is proved) and charges what `cost-v3` charges for it, through the
-same formulas as `CountedCheck.lean`. Their results are sealed numbers or booleans, so a checker built
-from them is billed for everything it learns about the network. Every operation comes with its
-specification: what its result means in terms of the checker's own functions, so that a soundness proof
-of a program never looks inside the monad.
+A scored checker is a function of an interpreter `I : Interp`: abstract numbers `I.V`, abstract booleans
+`I.B`, abstract counts `I.N`, in an abstract monad `I.M`, with every operation on a number charged by the
+interpreter and the only way to use a boolean being `I.ifN`, `I.ifV`, `I.ifB` and `I.ifU`. Because the
+checker has to make sense for every `I`, its own Lean code (recursion over lists, `Nat` indices, strings)
+can never look inside a value of `I.V`, `I.B` or `I.N`: whatever it learns about the network stays in
+the interpreter's hands, and the bill the interpreter keeps is the whole cost of the computation. This
+closes the hole of a language with concrete booleans, where a charged comparison yields a bit that free
+arithmetic can then use: here a bit cannot leave the monad.
+
+`Interp.counting` is the interpreter the service runs: `CostM` of `Counted.lean`, with `Q`, `Bool` and `Nat`.
+A submission's soundness theorem and instance theorem are about `D Interp.counting` (docs/COUNTED.md); the
+service checks that the checker's own code never mentions `Interp.counting`, `CostM` or `Q`
+(`accept/allowlist.txt`), so that the abstraction is real.
+
+The counted operations `CostM.single` and `CostM.interval` run a rule of the proved checker and charge what
+`cost-v3` charges for it, through the formulas of `CountedCheck.lean`; `Interp.counting` offers them as
+`single` and `interval`. Every operation of the counting interpreter has its specification lemma, so a
+soundness proof never looks inside the monad.
 
 This file uses only core Lean.
 -/
@@ -35,7 +47,7 @@ def interval (g : Graph) (task : Task) (box : Box) : CostM Bool := ⟨fun env c 
     | some ic, .ok b => some (b, c.add "interval" ic)
     | _, _ => none⟩
 
-/-! ## Specifications -/
+/-! ## Specifications of the monad and the operations -/
 
 theorem run_pure (a : α) (env : Env) (c : Cost) : (pure a : CostM α).run env c = some (a, c) := rfl
 
@@ -78,5 +90,167 @@ theorem interval_spec {g : Graph} {task : Task} {box : Box} {env : Env} {c c' : 
     · cases h
 
 end CostM
+
+/-! ## The interface -/
+
+/-- An interpreter of the counted language. A checker is a function of one of these: it can use the
+    operations below and ordinary Lean on lists, `Nat` indices and strings, and nothing else about `M`,
+    `V`, `B` or `N`. The charges named are those of `Interp.counting`. -/
+structure Interp : Type 1 where
+  /-- The monad of the computation. -/
+  M : Type → Type
+  monad : Monad M
+  /-- A number of the network or the certificate, or computed from them. -/
+  V : Type
+  /-- A truth value computed from numbers. -/
+  B : Type
+  /-- A count of inputs, computed from truth values. -/
+  N : Type
+  /-- Entry `i` of the weight `name`, in row-major order. Free: the weights are charged once per
+      proof (`extract`, E). -/
+  weight : String → Nat → M V
+  /-- The shape of a weight, for loops. Free. -/
+  weightShape : String → M (List Nat)
+  /-- Number `i` of the certificate. Free: the certificate is charged once per proof (`read`). -/
+  cert : Nat → M V
+  /-- How many numbers the certificate holds. Free. -/
+  certSize : M Nat
+  /-- A numeral, as a number read from the proof file: 1. -/
+  lit : String → Nat → M V
+  /-- Zero, free: the Python checker starts its sums at 0 without charge. -/
+  zero : V
+  /-- Arithmetic, 1 each; `muladd acc a b` is `acc + a * b`. -/
+  add : String → V → V → M V
+  sub : String → V → V → M V
+  muladd : String → V → V → V → M V
+  neg : String → V → M V
+  min : String → V → V → M V
+  max : String → V → V → M V
+  /-- Comparisons, 1 each: the only source of truth values about numbers. -/
+  lt : String → V → V → M B
+  le : String → V → V → M B
+  eq : String → V → V → M B
+  /-- Bounds on `exp a` (`Exp.lean`), charged 3; the monad fails if the argument is out of range. -/
+  exp : String → V → M (V × V)
+  /-- Add to the bill. A program can only make itself longer. -/
+  charge : String → Nat → M Unit
+  /-- Fail: the checker certifies nothing. -/
+  fail : {α : Type} → M α
+  /-- Branching on a truth value: the only way to use one, and the result stays a count, a number, a
+      truth value or nothing, so no bit of information about the network ever reaches ordinary Lean. -/
+  ifN : B → M N → M N → M N
+  ifV : B → M V → M V → M V
+  ifB : B → M B → M B → M B
+  ifU : B → M Unit → M Unit → M Unit
+  bnot : B → B
+  band : B → B → B
+  bor : B → B → B
+  /-- Counts. Free, as the Python checker's bookkeeping is. -/
+  nzero : N
+  nsucc : N → N
+  nadd : N → N → N
+  nofNat : Nat → N
+  /-- The checker's rules, charged as `cost-v3` charges the leaf (`CostM.single`, `CostM.interval`). -/
+  single : Graph → Task → Input → M B
+  interval : Graph → Task → Box → M B
+
+instance instMonadInterp (I : Interp) : Monad I.M := I.monad
+
+/-- A scored checker: a computation of a count, for every interpreter. -/
+abbrev Checker := (I : Interp) → I.M I.N
+
+/-- The interpreter the service runs: the charges of `cost-v3`, in `CostM`. -/
+@[reducible] def Interp.counting : Interp where
+  M := CostM
+  monad := inferInstance
+  V := Q
+  B := Bool
+  N := Nat
+  weight := CostM.weight
+  weightShape := CostM.weightShape
+  cert := CostM.cert
+  certSize := CostM.certSize
+  lit := CostM.lit
+  zero := ⟨0⟩
+  add := CostM.qadd
+  sub := CostM.qsub
+  muladd := CostM.qmuladd
+  neg := CostM.qneg
+  min := CostM.qmin
+  max := CostM.qmax
+  lt := CostM.qlt
+  le := CostM.qle
+  eq := CostM.qeq
+  exp := CostM.qexp
+  charge := CostM.charge
+  fail := CostM.fail
+  ifN := fun b t e => cond b t e
+  ifV := fun b t e => cond b t e
+  ifB := fun b t e => cond b t e
+  ifU := fun b t e => cond b t e
+  bnot := not
+  band := and
+  bor := or
+  nzero := 0
+  nsucc := Nat.succ
+  nadd := Nat.add
+  nofNat := id
+  single := CostM.single
+  interval := CostM.interval
+
+/-! ## The counting interpreter, operation by operation (all by `rfl`, for `simp`) -/
+
+namespace Interp
+
+@[simp] theorem counting_M : counting.M = CostM := rfl
+@[simp] theorem counting_V : counting.V = Q := rfl
+@[simp] theorem counting_B : counting.B = Bool := rfl
+@[simp] theorem counting_N : counting.N = Nat := rfl
+@[simp] theorem counting_weight : counting.weight = CostM.weight := rfl
+@[simp] theorem counting_weightShape : counting.weightShape = CostM.weightShape := rfl
+@[simp] theorem counting_cert : counting.cert = CostM.cert := rfl
+@[simp] theorem counting_certSize : counting.certSize = CostM.certSize := rfl
+@[simp] theorem counting_lit : counting.lit = CostM.lit := rfl
+@[simp] theorem counting_zero : counting.zero = (⟨(0 : Rat)⟩ : Q) := rfl
+@[simp] theorem counting_add : counting.add = CostM.qadd := rfl
+@[simp] theorem counting_sub : counting.sub = CostM.qsub := rfl
+@[simp] theorem counting_muladd : counting.muladd = CostM.qmuladd := rfl
+@[simp] theorem counting_neg : counting.neg = CostM.qneg := rfl
+@[simp] theorem counting_min : counting.min = CostM.qmin := rfl
+@[simp] theorem counting_max : counting.max = CostM.qmax := rfl
+@[simp] theorem counting_lt : counting.lt = CostM.qlt := rfl
+@[simp] theorem counting_le : counting.le = CostM.qle := rfl
+@[simp] theorem counting_eq : counting.eq = CostM.qeq := rfl
+@[simp] theorem counting_exp : counting.exp = CostM.qexp := rfl
+@[simp] theorem counting_charge : counting.charge = CostM.charge := rfl
+@[simp] theorem counting_ifN (b : counting.B) (t e : counting.M counting.N) :
+    counting.ifN b t e = cond b t e := rfl
+@[simp] theorem counting_ifV (b : counting.B) (t e : counting.M counting.V) :
+    counting.ifV b t e = cond b t e := rfl
+@[simp] theorem counting_ifB (b : counting.B) (t e : counting.M counting.B) :
+    counting.ifB b t e = cond b t e := rfl
+@[simp] theorem counting_ifU (b : counting.B) (t e : counting.M Unit) :
+    counting.ifU b t e = cond b t e := rfl
+@[simp] theorem counting_bnot : counting.bnot = not := rfl
+@[simp] theorem counting_band : counting.band = and := rfl
+@[simp] theorem counting_bor : counting.bor = or := rfl
+@[simp] theorem counting_nzero : counting.nzero = (0 : Nat) := rfl
+@[simp] theorem counting_nsucc : counting.nsucc = Nat.succ := rfl
+@[simp] theorem counting_nadd : counting.nadd = Nat.add := rfl
+@[simp] theorem counting_nofNat : counting.nofNat = id := rfl
+@[simp] theorem counting_single : counting.single = CostM.single := rfl
+@[simp] theorem counting_interval : counting.interval = CostM.interval := rfl
+
+/-- `do` notation in a checker uses the interpreter's monad; for the counting interpreter that is
+    `CostM`'s, so `CostM.run_bind` and `CostM.run_pure` apply once these two are rewritten. -/
+@[simp] theorem counting_bind {α β : Type} (x : counting.M α) (f : α → counting.M β) :
+    (@Bind.bind counting.M (instMonadInterp counting).toBind α β x f) =
+      (@Bind.bind CostM CostM.instMonad.toBind α β x f) := rfl
+
+@[simp] theorem counting_pure {α : Type} (a : α) :
+    (@Pure.pure counting.M (instMonadInterp counting).toPure α a) =
+      (@Pure.pure CostM CostM.instMonad.toPure α a) := rfl
+
+end Interp
 
 end CompactCheck

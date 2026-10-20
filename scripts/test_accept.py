@@ -63,6 +63,8 @@ def variant(tmp_path: Path, name: str, lean: str | None = None, manifest: dict |
 
 SOURCE = (EXAMPLE / "Candidate" / "Max2Tiny.lean").read_text()
 SCORED_SOURCE = (SCORED / "Candidate" / "Max2TinyScored.lean").read_text()
+NEW_D = "def D : Checker := fun I => countSingles I graph task (allInputs task.space)"
+assert NEW_D in SCORED_SOURCE
 
 
 def scored_variant(tmp_path: Path, name: str, lean: str) -> Path:
@@ -222,8 +224,7 @@ def test_a_wrong_bill_is_refused_scoring(work, tmp_path):
 def test_a_checker_that_trusts_the_certificate_is_rejected_with_its_sorry(work, tmp_path):
     """`D` returns the certificate's size as the count: its soundness theorem is false in general, so the
     candidate can only `sorry` it, and the whole submission is rejected (the target's proof uses it)."""
-    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
-                                "def D : CostM Nat := CostM.certSize")
+    src = SCORED_SOURCE.replace(NEW_D, "def D : Checker := fun I => do\n  let n ← I.certSize\n  pure (I.nofNat n)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h", "  sorry")
     src = src.replace("some (64, 64 * 63)", "some (0, 0)").replace("exact D_sound weights cert 64 cost h", "sorry")
     r = submit(scored_variant(tmp_path, "trusts-cert", src), work)
@@ -233,8 +234,7 @@ def test_a_checker_that_trusts_the_certificate_is_rejected_with_its_sorry(work, 
 def test_the_general_layer_may_not_touch_the_weights_not_proving_anti_hiding(work, tmp_path):
     """A checker that looks at the protected weights directly is outside the counted language, and the
     service says which constant it uses. This checks eligibility, not the anti-hiding property."""
-    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
-                                "def D : CostM Nat := countSingles (if weights.length = 0 then [] else allInputs task.space)")
+    src = SCORED_SOURCE.replace(NEW_D, "def D : Checker := fun I => countSingles I graph task (if weights.length = 0 then [] else allInputs task.space)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                       "  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide : ¬ weights.length = 0)] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
     r = submit(scored_variant(tmp_path, "uses-weights", src), work)
@@ -248,8 +248,8 @@ def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_h
     net = json.loads((work / "networks" / "max2_tiny-v8-s0.json").read_text())
     nums = [abs(v) for w in net["weights"] for v in w["ints"]]
     table = "def table : List Nat := [" + ", ".join(str(v) for v in nums) + "]\n\n"
-    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (allInputs task.space)",
-                                table + "/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (if table.length = 0 then [] else allInputs task.space)")
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                table + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task (if table.length = 0 then [] else allInputs task.space)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                       "  intro w c n cost h\n  unfold numCorrect\n  simp only [D, table, List.length_cons, Nat.succ_ne_zero, ite_false] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
     r = submit(scored_variant(tmp_path, "weights-copy", src), work)
@@ -260,14 +260,17 @@ def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_h
 
 
 def test_a_checker_outside_the_counted_language_is_refused_scoring(work, tmp_path):
-    """`CostM.mk` and `CostM.run` are not on the allowlist: a checker written as a bare function of the
-    environment is refused scoring, even when it computes the same thing."""
-    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
-                                "def D : CostM Nat := ⟨fun env c => (countSingles (allInputs task.space)).run env c⟩")
+    """`Interp.counting` and `CostM` are not on the allowlist: a checker that runs the counting interpreter
+    itself (for free, outside the bill) is refused scoring, even when the result is the same."""
+    src = SCORED_SOURCE.replace(NEW_D,
+                                "def D : Checker := fun I => countSingles I graph task "
+                                "(if (CostM.billed (countSingles Interp.counting graph task [[0, 0]]) ⟨[], #[]⟩).isSome then allInputs task.space else allInputs task.space)")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  simp only [D, ite_self] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
     r = submit(scored_variant(tmp_path, "bare-function", src), work)
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
-    assert s["status"] == "refused" and "CostM.mk" in s["reason"] and "CostM.run" in s["reason"], s
+    assert s["status"] == "refused" and "Interp.counting" in s["reason"] and "CostM.billed" in s["reason"], s
 
 
 # ---- kinds, assurance, zero coverage, the development compile --------------------------------------------
@@ -294,15 +297,15 @@ import CompactCheck.CountedOps
 namespace Candidate.Zero
 open CompactCheck Protected.N_max2_tiny_v8_s0_c0
 
-def D : CostM Nat := pure 0
+def D : Checker := fun I => pure I.nzero
 
 theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
-    CostM.exec D ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
   intro w c n cost h
   simp only [D, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
   omega
 
-theorem D_instance : CostM.billed D ⟨weights, cert⟩ = some (0, 0) := by decide +kernel
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 0) := by decide +kernel
 
 theorem performance : Target := Nat.zero_le _
 
@@ -332,7 +335,7 @@ def test_an_invented_axiom_is_rejected(work, tmp_path):
 def test_a_soundness_proof_about_another_checker_is_refused_scoring(work, tmp_path):
     """The manifest names D; the soundness theorem is about D2. The service builds the statement for D, so the
     kernel rejects the candidate's theorem at that type: verified, not scored."""
-    src = SCORED_SOURCE.replace("/-! ## Specific layer -/", "def D2 : CostM Nat := pure 0\n\ntheorem D2_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),\n    CostM.exec D2 ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by\n  intro w c n cost h\n  simp only [D2, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h\n  omega\n\n/-! ## Specific layer -/")
+    src = SCORED_SOURCE.replace("/-! ## Specific layer -/", "def D2 : Checker := fun I => pure I.nzero\n\ntheorem D2_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),\n    CostM.exec (D2 Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by\n  intro w c n cost h\n  simp only [D2, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h\n  omega\n\n/-! ## Specific layer -/")
     d = scored_variant(tmp_path, "other-program", src)
     m = json.loads((d / "manifest.json").read_text())
     m["scored"]["sound"] = "Candidate.Max2TinyScored.D2_sound"
@@ -358,17 +361,16 @@ def test_the_development_compile_reports_errors_and_never_accepts(work, tmp_path
     assert not list((work / "receipts").glob("*Dev*"))  # a compile is not a submission
 
 
-def test_the_agents_pilot_proof_is_verified_and_scored(work):
+def test_the_agents_pilot_proof_is_verified_and_refused_scoring_in_language_v2(work):
     """The pilot's third submission of round 1 (20 October 2026), kept as the agent wrote it: the columns of
-    M = U L E, 23 of 64 inputs for a bill of 458. Under the first policy its literal weight came out at 97
-    (equation lemmas and compiler-made auxiliaries counted, strings charged per 2 bytes); the author's own
-    literals weigh 16."""
+    M = U L E, 23 of 64 inputs for a bill of 458. It was written in the first counted language (a concrete
+    `CostM Nat`, with concrete booleans); language v2 (a checker is a function of the interpreter) refuses
+    it: its checker uses `CostM` directly. Its mathematics is still verified."""
     r = submit(AGENT, work)
     assert r["status"] == "accepted" and r["certified_count"] == 23, r["reason"]
     s = r["scoring"]
-    assert s["status"] == "scored", s["reason"]
-    assert s["bill"] == 458 and s["length"] == 538 and s["literals"] == 16 and s["literals"] <= s["literal_budget"]
-    assert r["score_eligible"] is True and r["execution_assurance"] == "kernel_checked_instance"
+    assert s["status"] == "refused" and "CostM" in s["reason"], s
+    assert r["score_eligible"] is False
 
 
 # ---- the handoff's remaining fixtures ----------------------------------------------------------------------
@@ -386,13 +388,11 @@ def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_ant
     for v in nums:
         packed = (packed << 24) | v
     table = f"def packed : Nat := {packed}\n\ndef unpack (n k : Nat) : Nat := (n >>> (24 * k)) % (1 <<< 24)\n\n"
-    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (allInputs task.space)",
-                                table + "/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (if unpack packed 0 = 0 then [] else allInputs task.space)")
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                table + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task (if unpack packed 0 = 0 then [] else allInputs task.space)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                       "  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide : ¬ unpack packed 0 = 0)] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
     r = submit(scored_variant(tmp_path, "weights-packed", src), work)
-    if r["status"] == "rejected" and "does not compile" in r["reason"]:
-        pytest.skip("the packed variant did not compile on this toolchain: " + r["reason"][-300:])
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
     assert s["status"] == "refused" and "literal weight" in s["reason"], s
@@ -419,3 +419,28 @@ def test_a_candidate_cannot_change_its_sources_during_evaluation(work, tmp_path)
     assert r["status"] == "rejected" and "does not compile" in r["reason"], r["reason"]
     copies = sorted((work / "submissions").glob("race-*/Candidate/Max2Tiny.lean"))
     assert copies and copies[-1].read_text() == src
+
+
+def test_renaming_or_hiding_a_definition_does_not_hide_its_data(work, tmp_path):
+    """The literal budget is measured over the checker's computational closure, whatever the names: a
+    private definition, an underscore name or a `match_1` name carrying a copy of the weights is still
+    counted, and the submission refused scoring."""
+    sys.path.insert(0, str(HERE))
+    import accept
+    sys.path.pop(0)
+    accept._repo = REPO
+    net = json.loads(accept.export_network(REPO, "tests/max2_tiny", "max2_tiny-v8-s0", work).read_text())
+    nums = [abs(v) for w in net["weights"] for v in w["ints"]]
+    for name, decl in (("private-table", "private def table"), ("underscore-table", "def _table"), ("match-name", "def match_1")):
+        ident = decl.split()[-1]
+        table = f"{decl} : List Nat := [" + ", ".join(str(v) for v in nums) + "]\n\n"
+        src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                    table + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task "
+                                    f"(if {ident}.length = 0 then [] else allInputs task.space)")
+        src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                          f"  intro w c n cost h\n  unfold numCorrect\n  simp only [D, {ident}, List.length_cons, Nat.succ_ne_zero, ite_false] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+        r = submit(scored_variant(tmp_path, name, src), work)
+        assert r["status"] == "accepted", (name, r["reason"])
+        s = r["scoring"]
+        assert s["status"] == "refused" and "literal weight" in s["reason"], (name, s)
+        assert s["literals"] >= len(nums)

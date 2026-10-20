@@ -1,7 +1,7 @@
 import Lean
 import CompactCheck.Json
 import CompactCheck.Spec
-import CompactCheck.Counted
+import CompactCheck.CountedOps
 
 set_option linter.style.longLine false
 
@@ -30,12 +30,13 @@ candidate's constant has the target's type. The last line of output is a JSON ob
 
 The scored path (docs/COUNTED.md): after the same replay, asks the kernel to accept two theorems whose
 statements this program builds itself, `Challenge.sound` at the fixed soundness shape of the checker
-`D = <checker>` (for all weights `w`, certificates `c`, counts `n` and bills `cost`: if `CostM.exec D ⟨w, c⟩ =
-some (n, cost)` then `n ≤ numCorrect graph w task`), proved by `<sound>`, and `Challenge.instance`,
-`CostM.billed D ⟨weights, cert⟩ = some (<claimed count>, <claimed bill>)`, proved by `<instance>`. The
-general layer (the checker, its soundness proof and everything they depend on) may use the protected
-module's `graph` and `task` but no other protected constant; it is replayed first and timed on its own,
-and its literal weight is counted, for the service's budgets. The last line is
+`D = <checker> : Checker` (for all weights `w`, certificates `c`, counts `n` and bills `cost`: if
+`CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost)` then `n ≤ numCorrect graph w task`), proved by
+`<sound>`, and `Challenge.instance`, `CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (<claimed
+count>, <claimed bill>)`, proved by `<instance>`. The general layer (the checker, its soundness proof and
+everything they depend on) may use the protected module's `graph` and `task` but no other protected
+constant; it is replayed first and timed on its own. The literal weight is measured over the checker's
+computational closure (its definitions, through definitions only), bodies, no exemption by name. The last line is
 `{"status": "accepted" | "rejected", "reason": ..., "axioms": [...], "replayed": n,
   "general": {"constants": k, "literals": l, "kernel_ms": ms}, "rest": {...}, "challenge_ms": ms}`.
 
@@ -148,13 +149,16 @@ def pairE (a b x y : Expr) : Expr := mkApp4 (mkConst ``Prod.mk [Level.zero, Leve
 def eqE (ty a b : Expr) : Expr := mkApp3 (mkConst ``Eq [Level.one]) ty a b
 def envE (w c : Expr) : Expr := mkApp2 (mkConst ``CompactCheck.Env.mk) w c
 
-/-- The soundness shape of a checker `D`:
+/-- The checker run by the counting interpreter: `D Interp.counting : CostM Nat`. -/
+def counted (D : Name) : Expr := mkApp (mkConst D) (mkConst ``CompactCheck.Interp.counting)
+
+/-- The soundness shape of a checker `D : Checker`:
     `∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
-      CostM.exec D ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task`. -/
+      CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task`. -/
 def soundType (D graph task : Name) : Expr :=
   -- inside the hypothesis: w = bvar 3, c = bvar 2, n = bvar 1, cost = bvar 0
   let hyp := eqE (optionT (prodT natT costT))
-    (mkApp3 (mkConst ``CompactCheck.CostM.exec) natT (mkConst D) (envE (mkBVar 3) (mkBVar 2)))
+    (mkApp3 (mkConst ``CompactCheck.CostM.exec) natT (counted D) (envE (mkBVar 3) (mkBVar 2)))
     (someE (prodT natT costT) (pairE natT costT (mkBVar 1) (mkBVar 0)))
   -- inside the conclusion: w = bvar 4, c = bvar 3, n = bvar 2, cost = bvar 1, h = bvar 0
   let concl := mkApp4 (mkConst ``LE.le [Level.zero]) natT (mkConst ``instLENat) (mkBVar 2)
@@ -162,10 +166,10 @@ def soundType (D graph task : Name) : Expr :=
   mkForall `w .default weightsT (mkForall `c .default certT (mkForall `n .default natT
     (mkForall `cost .default costT (mkForall `h .default hyp concl))))
 
-/-- The instance: `CostM.billed D ⟨weights, cert⟩ = some (n, bill)`. -/
+/-- The instance: `CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (n, bill)`. -/
 def instanceType (D weights cert : Name) (n bill : Nat) : Expr :=
   eqE (optionT (prodT natT natT))
-    (mkApp3 (mkConst ``CompactCheck.CostM.billed) natT (mkConst D) (envE (mkConst weights) (mkConst cert)))
+    (mkApp3 (mkConst ``CompactCheck.CostM.billed) natT (counted D) (envE (mkConst weights) (mkConst cert)))
     (someE (prodT natT natT) (pairE natT natT (mkNatLit n) (mkNatLit bill)))
 
 /-- The candidate's constants, by name: `none` with a reason if one is a trusted constant's name, is in
@@ -276,38 +280,30 @@ where
     modify (·.insert e n)
     return n
 
-/-- Whether a constant of the environment is a proof: its type is a proposition, by the kernel's own
-    type checker (a recursive theorem's auxiliary definitions are proofs too, though not `theorem`s). -/
-def isProof (env : Environment) (ci : ConstantInfo) : Bool :=
-  match Kernel.check env {} ci.type with
-  | .ok sort => match Kernel.whnf env {} sort with
-    | .ok (.sort u) => u.isZero
-    | _ => false
-  | .error _ => false
+/-- The computational closure of the checker: the candidate's definitions it uses, transitively, through
+    definitions and never through theorems (a proof computes nothing). What the checker computes is a
+    function of these bodies and of the interpreter, so this is where free data could steer it, and the
+    literal budget is measured here: over the bodies, with no exemption by name (a name is the author's
+    to choose). -/
+partial def computationalClosure (cs : Std.HashMap Name ConstantInfo) (root : Name) : NameSet := Id.run do
+  let mut visited : NameSet := {}
+  let mut stack : List Name := [root]
+  while true do
+    match stack with
+    | [] => break
+    | n :: rest =>
+      stack := rest
+      if visited.contains n then continue
+      let some ci := cs.get? n | continue
+      if ci matches .thmInfo _ then continue
+      visited := visited.insert n
+      for m in ci.getUsedConstantsAsSet.toList do
+        if !visited.contains m && cs.contains m then stack := m :: stack
+  return visited
 
-/-- Lean's own equation lemmas of a definition (`f.eq_1`, `f.eq_def`, `f.eq_unfold`, ...): their statements
-    repeat the definition's body, which is counted once already. -/
-def isEquationLemma (n : Name) : Bool :=
-  match n with
-  | .str _ s => s == "eq_def" || s == "eq_unfold" || (s.startsWith "eq_" && (s.drop 3).all Char.isDigit && s.length > 3)
-  | _ => false
-
-/-- A constant the compiler made rather than the author: a private or internal name (a component starting
-    with `_`, such as `_proof_1_3` and `_sparseCasesOn_1`), a `match_n` or `proof_n` auxiliary, a splitter.
-    Their statements repeat what the author's definitions and proofs already hold. -/
-def isCompilerMade (n : Name) : Bool :=
-  n.components.any fun c => match c with
-    | .str _ s => s.startsWith "_" || s == "splitter" ||
-        ((s.startsWith "match_" && (s.drop 6).all (fun ch => ch.isDigit || ch == '_') && s.length > 6)) ||
-        ((s.startsWith "proof_" && (s.drop 6).all (fun ch => ch.isDigit || ch == '_') && s.length > 6))
-    | _ => false
-
-/-- The literal weight of a constant: its statement, and its body unless it is a proof (a proof term
-    proves its statement and nothing else; what it computes is bounded by the kernel budget). An
-    equation lemma or a compiler-made auxiliary weighs nothing. -/
-def constLitWeight (env : Environment) (ci : ConstantInfo) : Nat :=
-  if isEquationLemma ci.name || isCompilerMade ci.name then 0 else
-  litWeight ci.type + (if isProof env ci then 0 else match ci.value? with | some v => litWeight v | none => 0)
+/-- The literal weight of a definition: its body. -/
+def bodyLitWeight (ci : ConstantInfo) : Nat :=
+  match ci.value? with | some v => litWeight v | none => 0
 
 /-- Replay a set of the candidate's constants into the kernel environment, timed. -/
 def replayTimed (kenv : Kernel.Environment) (cs : Std.HashMap Name ConstantInfo) :
@@ -358,12 +354,12 @@ def runScore (prot D sound inst : Name) (n bill : Nat) (trusted : List Name) (ol
   let (kenv, generalMs) ← match ← replayTimed kenv generalMap with
     | .ok r => pure r
     | .error e => return ← rejected e
-  let genv := Environment.ofKernelEnv kenv
+  let comp := computationalClosure cs D
   let mut lits : Nat := 0
   let mut litsBy : Array (String × Json) := #[]
-  for g in general do
+  for g in comp do
     let some ci := cs.get? g | continue
-    let w := constLitWeight genv ci
+    let w := bodyLitWeight ci
     lits := lits + w
     if w > 0 then litsBy := litsBy.push (g.toString, Lean.toJson w)
   let (kenv, restMs) ← match ← replayTimed kenv restMap with
@@ -380,8 +376,8 @@ def runScore (prot D sound inst : Name) (n bill : Nat) (trusted : List Name) (ol
   let axioms := (axiomsOf kenv `Challenge.sound ++ axiomsOf kenv `Challenge.instance).toList.eraseDups.toArray.qsort Name.lt
   jsonOut [("status", "accepted"), ("reason", Json.null),
     ("axioms", Json.arr (axioms.map fun a => Json.str a.toString)), ("replayed", Lean.toJson cs.size),
-    ("general", Json.mkObj [("constants", Lean.toJson general.size), ("literals", Lean.toJson lits),
-      ("literals_by", Json.mkObj litsBy.toList), ("kernel_ms", Lean.toJson generalMs)]),
+    ("general", Json.mkObj [("constants", Lean.toJson general.size), ("checker_constants", Lean.toJson comp.size),
+      ("literals", Lean.toJson lits), ("literals_by", Json.mkObj litsBy.toList), ("kernel_ms", Lean.toJson generalMs)]),
     ("rest", Json.mkObj [("constants", Lean.toJson restMap.size), ("kernel_ms", Lean.toJson restMs)]),
     ("challenge_ms", Lean.toJson challengeMs)]
   return 0

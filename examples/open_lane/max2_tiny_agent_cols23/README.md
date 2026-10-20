@@ -9,7 +9,10 @@ covers 23 of the 64 inputs for a bill of 458, chosen to fit the 540 budget of th
 
 The service verified it (23 of 64, kernel-checked) and refused scoring under the first policy, whose
 literal measure counted Lean's equation lemmas and charged the three weight names 25: 97 against a budget
-of 42. The measure was corrected after this submission (equation lemmas weigh nothing, a string 1 per 8
-bytes); the test suite now expects this module to be scored at length 538.
+of 42. Later that day the language itself changed: a reviewer showed that the first language (a concrete
+`CostM Nat` with concrete booleans) let a checker turn charged comparisons into free arithmetic, and the
+language became an interface (`Checker := (I : Interp) → I.M I.N`, docs/COUNTED.md). This module is a
+program of the first language; the service still verifies its mathematics and refuses to score it, since
+its checker uses `CostM` directly. The test suite expects exactly that.
 
-Kept unchanged, as the agent wrote it, as a fixture.
+Kept unchanged, as the agent wrote it, as the record of the pilot's first round.

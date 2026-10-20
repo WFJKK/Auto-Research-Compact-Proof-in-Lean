@@ -3,30 +3,48 @@
 # make, read or convert a number of the network except the counted primitives. Grown from the programs the
 # tests accept; `acceptcheck closure` names what is missing.
 
-# the counted primitives and the monad
-CompactCheck.CostM
-CompactCheck.CostM.instMonad
-CompactCheck.CostM.pure
-CompactCheck.CostM.bind
-CompactCheck.CostM.fail
-CompactCheck.CostM.charge
-CompactCheck.CostM.weight
-CompactCheck.CostM.weightShape
-CompactCheck.CostM.cert
-CompactCheck.CostM.certSize
-CompactCheck.CostM.lit
-CompactCheck.CostM.zero
-CompactCheck.CostM.qadd
-CompactCheck.CostM.qsub
-CompactCheck.CostM.qmuladd
-CompactCheck.CostM.qneg
-CompactCheck.CostM.qmin
-CompactCheck.CostM.qmax
-CompactCheck.CostM.qlt
-CompactCheck.CostM.qle
-CompactCheck.CostM.qeq
-CompactCheck.CostM.qexp
-CompactCheck.Q
+# the interface of the counted language (CountedOps.lean): a checker is a function of an interpreter I and
+# may use its fields, never the counting interpreter itself (Interp.counting, CostM, Q: not on this list)
+CompactCheck.Interp
+CompactCheck.Interp.mk
+CompactCheck.Interp.M
+CompactCheck.Interp.monad
+CompactCheck.Interp.V
+CompactCheck.Interp.B
+CompactCheck.Interp.N
+CompactCheck.Interp.weight
+CompactCheck.Interp.weightShape
+CompactCheck.Interp.cert
+CompactCheck.Interp.certSize
+CompactCheck.Interp.lit
+CompactCheck.Interp.zero
+CompactCheck.Interp.add
+CompactCheck.Interp.sub
+CompactCheck.Interp.muladd
+CompactCheck.Interp.neg
+CompactCheck.Interp.min
+CompactCheck.Interp.max
+CompactCheck.Interp.lt
+CompactCheck.Interp.le
+CompactCheck.Interp.eq
+CompactCheck.Interp.exp
+CompactCheck.Interp.charge
+CompactCheck.Interp.fail
+CompactCheck.Interp.ifN
+CompactCheck.Interp.ifV
+CompactCheck.Interp.ifB
+CompactCheck.Interp.ifU
+CompactCheck.Interp.bnot
+CompactCheck.Interp.band
+CompactCheck.Interp.bor
+CompactCheck.Interp.nzero
+CompactCheck.Interp.nsucc
+CompactCheck.Interp.nadd
+CompactCheck.Interp.nofNat
+CompactCheck.Interp.single
+CompactCheck.Interp.interval
+CompactCheck.instMonadInterp
+CompactCheck.Checker
 
 # monads, as `do` notation uses them
 Bind
@@ -338,9 +356,6 @@ WellFoundedRelation
 WellFoundedRelation.rel
 WellFoundedRelation.wf
 
-# the counted operations (CountedOps.lean): each runs a rule of the checker and charges what cost-v3 charges
-CompactCheck.CostM.single
-CompactCheck.CostM.interval
 
 # the checker's structure: inputs, boxes and the task's shape (no number of the network)
 CompactCheck.Input
