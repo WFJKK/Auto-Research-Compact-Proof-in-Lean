@@ -337,3 +337,36 @@ invImage
 WellFoundedRelation
 WellFoundedRelation.rel
 WellFoundedRelation.wf
+
+# the counted operations (CountedOps.lean): each runs a rule of the checker and charges what cost-v3 charges
+CompactCheck.CostM.single
+CompactCheck.CostM.interval
+
+# the checker's structure: inputs, boxes and the task's shape (no number of the network)
+CompactCheck.Input
+CompactCheck.Box
+CompactCheck.Range
+CompactCheck.Range.mk
+CompactCheck.Range.lo
+CompactCheck.Range.hi
+CompactCheck.allInputs
+CompactCheck.rootBox
+CompactCheck.boxSize
+CompactCheck.inBox
+CompactCheck.Task
+CompactCheck.Task.name
+CompactCheck.Task.space
+CompactCheck.Task.label
+CompactCheck.Graph
+CompactCheck.Graph.positions
+CompactCheck.Graph.values
+
+# structural recursion
+PProd
+PProd.mk
+PProd.fst
+PProd.snd
+List.below
+List.brecOn
+Nat.below
+Nat.brecOn

@@ -2,7 +2,7 @@
 """Write the protected target of the open lane: a Lean module with one network's graph, exact weights and
 task as constants, and the statement a candidate has to prove.
 
-    python3 scripts/make_protected.py <network.json> <claimed count> <out dir>
+    python3 scripts/make_protected.py <network.json> <claimed count> <out dir> [<certificate.json>]
 
 reads a network file written by scripts/export_network.py and writes <out dir>/Protected/<module>.lean, the module named after the network and the claimed count:
 
@@ -10,8 +10,13 @@ reads a network file written by scripts/export_network.py and writes <out dir>/P
     def graph : Graph := ...          -- the exported graph, operation by operation
     def weights : Weights ℚ := ...    -- every weight, as dyadic rationals
     def task : Task := maxTask 2 8    -- the task named in the file, as parseNetwork builds it
+    def cert : Cert := #[...]         -- the certificate of a scored submission (empty otherwise)
     def claimedCount : Nat := <claimed count>
     def Target : Prop := claimedCount ≤ numCorrect graph weights task
+
+A certificate is a JSON list of numbers: integers, or [p, q] for p/q (q > 0), or floats, which the
+service turns into exact [p, q] pairs. Its canonical form (integers and pairs only) is hashed into the
+module name, so a candidate with a certificate gets a module of its own.
 
 The module is part of the trusted base of an open-lane result, as scripts/export_network.py is: a candidate
 proves `Target`, and `Target` means what it should only if these constants are the network. The acceptance
@@ -25,7 +30,9 @@ Prints the module name.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -35,10 +42,52 @@ class ProtectedError(ValueError):
     pass
 
 
-def module_name(network_id: str, claimed: int) -> str:
+def module_name(network_id: str, claimed: int, cert: list | None = None) -> str:
     """`max2-v64-s0` with claimed count 63 becomes `N_max2_v64_s0_c63`: a Lean identifier that starts with a
-    letter, different for every network and claimed count."""
-    return "N_" + re.sub(r"[^A-Za-z0-9]", "_", network_id) + f"_c{claimed}"
+    letter, different for every network and claimed count. A nonempty certificate adds `_h<16 hex digits>`
+    of its canonical form."""
+    name = "N_" + re.sub(r"[^A-Za-z0-9]", "_", network_id) + f"_c{claimed}"
+    if cert:
+        name += "_h" + cert_digest(cert)
+    return name
+
+
+def canonical_cert(cert) -> list:
+    """Integers stay; floats become exact [p, q] pairs; [p, q] pairs are reduced; anything else is an error."""
+    if not isinstance(cert, list):
+        raise ProtectedError("the certificate must be a JSON list of numbers")
+    out = []
+    for i, v in enumerate(cert):
+        if isinstance(v, bool):
+            raise ProtectedError(f"certificate entry {i} is a boolean")
+        if isinstance(v, int):
+            out.append(v)
+        elif isinstance(v, float):
+            if v != v or v in (float("inf"), float("-inf")):
+                raise ProtectedError(f"certificate entry {i} is not finite")
+            p, q = v.as_integer_ratio()
+            out.append(p if q == 1 else [p, q])
+        elif isinstance(v, list) and len(v) == 2 and all(isinstance(x, int) and not isinstance(x, bool) for x in v):
+            p, q = v
+            if q <= 0:
+                raise ProtectedError(f"certificate entry {i} has a denominator that is not positive")
+            g = math.gcd(p, q)
+            p, q = p // g, q // g
+            out.append(p if q == 1 else [p, q])
+        else:
+            raise ProtectedError(f"certificate entry {i} must be an integer, a float or a pair [p, q]")
+    return out
+
+
+def cert_digest(cert: list) -> str:
+    return hashlib.sha256(json.dumps(canonical_cert(cert), separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def lean_rat(v) -> str:
+    if isinstance(v, int):
+        return f"({v} : Rat)"
+    p, q = v
+    return f"(mkRat {lean_int(p)} {q})"
 
 
 def lean_int(v: int) -> str:
@@ -111,10 +160,11 @@ def lean_task(name: str, positions: int, values: int) -> str:
     raise ProtectedError(f"unknown task {name}")
 
 
-def render(net: dict, claimed: int) -> tuple[str, str]:
+def render(net: dict, claimed: int, cert: list | None = None) -> tuple[str, str]:
     """(module name, Lean source)."""
     if net.get("format") != "compactcheck-network-v1":
         raise ProtectedError(f"not a network file: format {net.get('format')!r}")
+    cert = canonical_cert(cert or [])
     g = net["graph"]
     space = [g["values"]] * g["positions"]
     domain = 1
@@ -122,8 +172,9 @@ def render(net: dict, claimed: int) -> tuple[str, str]:
         domain *= v
     if not isinstance(claimed, int) or isinstance(claimed, bool) or claimed < 0 or claimed > domain:
         raise ProtectedError(f"the claimed count must be an integer from 0 to {domain}, not {claimed!r}")
-    name = module_name(net["network"], claimed)
+    name = module_name(net["network"], claimed, cert)
     ops = ",\n    ".join(lean_op(n) for n in g["nodes"])
+    cert_src = "#[" + ", ".join(lean_rat(v) for v in cert) + "]"
     weights = []
     for w in net["weights"]:
         ints = w["ints"]
@@ -136,9 +187,10 @@ def render(net: dict, claimed: int) -> tuple[str, str]:
     weights_src = ",\n    ".join(weights) if weights else ""
     src = f"""import CompactCheck.Json
 import CompactCheck.Spec
+import CompactCheck.Counted
 
 /-!
-# Protected target: network `{net["network"]}`, claimed count {claimed}
+# Protected target: network `{net["network"]}`, claimed count {claimed}{", certificate of " + str(len(cert)) + " numbers" if cert else ""}
 
 Written by scripts/make_protected.py from a network file of scripts/export_network.py. Not to be edited:
 the acceptance service generates it, and checks its constants against the file with the checker's reader.
@@ -163,6 +215,10 @@ def weights : Weights ℚ := [
 /-- The task, as `taskByName` builds it for this input shape. -/
 def task : Task := {lean_task(net["task"], g["positions"], g["values"])}
 
+/-- The certificate of a scored submission, as the manifest gives it ({len(cert)} numbers); a checker reads
+    it through `CostM.cert`. -/
+def cert : Cert := {cert_src}
+
 /-- The number of inputs the candidate claims the network answers correctly. -/
 def claimedCount : Nat := {claimed}
 
@@ -176,10 +232,11 @@ end Protected.{name}
 
 
 def main() -> None:
-    if len(sys.argv) != 4:
+    if len(sys.argv) not in (4, 5):
         sys.exit(__doc__)
     net = json.loads(Path(sys.argv[1]).read_text())
-    name, src = render(net, int(sys.argv[2]))
+    cert = json.loads(Path(sys.argv[4]).read_text()) if len(sys.argv) == 5 else []
+    name, src = render(net, int(sys.argv[2]), cert)
     out = Path(sys.argv[3]) / "Protected"
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{name}.lean").write_text(src)

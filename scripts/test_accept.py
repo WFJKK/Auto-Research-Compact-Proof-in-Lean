@@ -23,6 +23,7 @@ import pytest
 HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 EXAMPLE = PROJECT / "examples" / "open_lane" / "max2_tiny_brute"
+SCORED = PROJECT / "examples" / "open_lane" / "max2_tiny_scored"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -43,10 +44,10 @@ def submit(candidate: Path, work: Path, mode: str = "hardened") -> dict:
 
 
 def variant(tmp_path: Path, name: str, lean: str | None = None, manifest: dict | None = None,
-            module_path: str = "Candidate/Max2Tiny.lean") -> Path:
+            module_path: str = "Candidate/Max2Tiny.lean", base: Path = EXAMPLE) -> Path:
     """A copy of the example with its Lean source or manifest changed."""
     d = tmp_path / name
-    shutil.copytree(EXAMPLE, d)
+    shutil.copytree(base, d)
     m = json.loads((d / "manifest.json").read_text())
     if manifest:
         m.update(manifest)
@@ -60,6 +61,11 @@ def variant(tmp_path: Path, name: str, lean: str | None = None, manifest: dict |
 
 
 SOURCE = (EXAMPLE / "Candidate" / "Max2Tiny.lean").read_text()
+SCORED_SOURCE = (SCORED / "Candidate" / "Max2TinyScored.lean").read_text()
+
+
+def scored_variant(tmp_path: Path, name: str, lean: str) -> Path:
+    return variant(tmp_path, name, lean=lean, module_path="Candidate/Max2TinyScored.lean", base=SCORED)
 
 
 def test_the_hand_built_proof_is_accepted(work):
@@ -185,3 +191,79 @@ def test_a_tampered_protected_module_is_caught(work, tmp_path):
                                 res["olean"]], env, mode, 600, [str(accept.toolchain_root(lean)), str(PROJECT), str(net_json)])
     last = accept.last_json(chk["stdout"])
     assert last and last["status"] == "mismatch" and "weights" in last["reason"], chk
+
+
+# ---- the scored path (docs/COUNTED.md) ------------------------------------------------------------------
+def test_the_scored_proof_is_verified_and_scored(work):
+    r = submit(SCORED, work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 64 * 63 and s["read"] == 0 and s["extract"] == 80
+    assert s["length"] == s["bill"] + s["extract"] + s["read"]
+    assert s["literals"] <= s["literal_budget"] and s["general_kernel_ms"] <= s["general_kernel_budget_ms"]
+    assert set(s["axioms"]) <= {"propext", "Classical.choice", "Quot.sound"}
+    assert [x["step"] for x in r["steps"]] == ["protected", "compile", "kernel", "closure", "score"]
+
+
+def test_a_wrong_bill_is_refused_scoring(work, tmp_path):
+    """The instance theorem states the exact bill; the service asks for the manifest's. The kernel's rejection
+    of the mismatched statement refuses scoring, and the proof stays verified."""
+    d = variant(tmp_path, "wrong-bill", module_path="Candidate/Max2TinyScored.lean", base=SCORED)
+    m = json.loads((d / "manifest.json").read_text())
+    m["scored"]["claimed_bill"] = 4031
+    (d / "manifest.json").write_text(json.dumps(m))
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 64
+    assert r["scoring"]["status"] == "refused" and "Challenge.instance" in r["scoring"]["reason"]
+
+
+def test_a_checker_that_trusts_the_certificate_is_rejected_with_its_sorry(work, tmp_path):
+    """`D` returns the certificate's size as the count: its soundness theorem is false in general, so the
+    candidate can only `sorry` it, and the whole submission is rejected (the target's proof uses it)."""
+    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
+                                "def D : CostM Nat := CostM.certSize")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h", "  sorry")
+    src = src.replace("some (64, 64 * 63)", "some (0, 0)").replace("exact D_sound weights cert 64 cost h", "sorry")
+    r = submit(scored_variant(tmp_path, "trusts-cert", src), work)
+    assert r["status"] == "rejected" and "sorryAx" in r["reason"]
+
+
+def test_the_general_layer_may_not_touch_the_weights_not_proving_anti_hiding(work, tmp_path):
+    """A checker that looks at the protected weights directly is outside the counted language, and the
+    service says which constant it uses. This checks eligibility, not the anti-hiding property."""
+    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
+                                "def D : CostM Nat := countSingles (if weights.length = 0 then [] else allInputs task.space)")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide : ¬ weights.length = 0)] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+    r = submit(scored_variant(tmp_path, "uses-weights", src), work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "weights" in s["reason"], s
+
+
+def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_hiding(work, tmp_path):
+    """A general-layer definition carrying the network's numbers as literals goes over the literal budget."""
+    net = json.loads((work / "networks" / "max2_tiny-v8-s0.json").read_text())
+    nums = [abs(v) for w in net["weights"] for v in w["ints"]]
+    table = "def table : List Nat := [" + ", ".join(str(v) for v in nums) + "]\n\n"
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (allInputs task.space)",
+                                table + "/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (if table.length = 0 then [] else allInputs task.space)")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  simp only [D, table, List.length_cons, Nat.succ_ne_zero, ite_false] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+    r = submit(scored_variant(tmp_path, "weights-copy", src), work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "literal weight" in s["reason"], s
+    assert s["literals"] >= len(nums)
+
+
+def test_a_checker_outside_the_counted_language_is_refused_scoring(work, tmp_path):
+    """`CostM.mk` and `CostM.run` are not on the allowlist: a checker written as a bare function of the
+    environment is refused scoring, even when it computes the same thing."""
+    src = SCORED_SOURCE.replace("def D : CostM Nat := countSingles (allInputs task.space)",
+                                "def D : CostM Nat := ⟨fun env c => (countSingles (allInputs task.space)).run env c⟩")
+    r = submit(scored_variant(tmp_path, "bare-function", src), work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "CostM.mk" in s["reason"] and "CostM.run" in s["reason"], s

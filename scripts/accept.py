@@ -30,9 +30,22 @@ axioms), unsupported (the network has an operation the Lean checker does not kno
 (infrastructure). A certified count is given only with status accepted. Receipts go to <work>/receipts/,
 which the box cannot write. The service never trusts a candidate's own build output.
 
-    python3 scripts/accept.py protected <network.json> <claimed> --work <work dir>
+A scored submission (docs/COUNTED.md) adds to its manifest
 
-builds and checks a protected module alone (for tests).
+    "scored": {"checker": "Candidate.X.D", "sound": "Candidate.X.D_sound", "instance": "Candidate.X.D_instance",
+               "certificate": [...numbers...], "claimed_bill": 12345}
+
+and, once verified as above, goes through the scored path: the certificate becomes the protected module's
+`cert`; `acceptcheck closure` checks that the checker touches numbers only through the counted primitives
+(accept/allowlist.txt); `acceptcheck score` has the kernel accept the soundness theorem at the fixed shape and
+the instance `CostM.billed D ⟨weights, cert⟩ = some (claimed_count, claimed_bill)`, and measures the general
+layer (literal weight, kernel time), which the policy budgets below bound. The receipt's `scoring` block says
+whether the submission is scored and gives the length in cost-v3 units: the bill, plus `extract` (one per
+weight entry) and `read` (one per certificate number). A submission refused scoring stays verified.
+
+    python3 scripts/accept.py protected <network.json> <claimed> --work <work dir> [--certificate c.json]
+
+builds and checks a protected module alone (for tests, and for a candidate's own development).
 """
 
 from __future__ import annotations
@@ -59,6 +72,15 @@ IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")
 COMPILE_TIMEOUT_S = 3600
 CHECK_TIMEOUT_S = 3600
 MEMORY_MB = 12288  # virtual: Mathlib's .olean files are mapped into memory
+ALLOWLIST = LEAN_PROJECT / "accept" / "allowlist.txt"
+# the scoring policy (docs/COUNTED.md): the general layer's free data and kernel work are bounded
+LITERAL_BUDGET_BASE = 32      # literal weight allowed to the general layer (acceptcheck's litWeight) ...
+LITERAL_BUDGET_PER_PARAM = 8  # ... plus one per this many weight entries: a copy of the weights costs more
+GENERAL_KERNEL_BUDGET_MS = 120_000  # kernel time to replay the general layer
+
+
+def literal_budget(extract: int) -> int:
+    return LITERAL_BUDGET_BASE + extract // LITERAL_BUDGET_PER_PARAM
 
 
 class Reject(Exception):
@@ -295,11 +317,35 @@ def read_manifest(cdir: Path) -> dict:
         raise Reject("model must be a relative path in the pipeline repository")
     if not re.match(r"^[A-Za-z0-9_-]+$", m["network"]):
         raise Reject("network must be a network id")
+    if "scored" in m:
+        s = m["scored"]
+        if not isinstance(s, dict):
+            raise Reject("scored must be an object")
+        for key in ("checker", "sound", "instance"):
+            v = s.get(key)
+            if not isinstance(v, str):
+                raise Reject(f"scored.{key} must be a constant name")
+            ps = v.split(".")
+            if len(ps) < 2 or ps[0] != "Candidate" or not all(IDENT.match(x) for x in ps):
+                raise Reject(f"scored.{key} must be a name under Candidate., made of identifiers")
+        b = s.get("claimed_bill")
+        if not isinstance(b, int) or isinstance(b, bool) or b < 0:
+            raise Reject("scored.claimed_bill must be a natural number")
+        sys.path.insert(0, str(HERE))
+        try:
+            import make_protected
+        finally:
+            sys.path.pop(0)
+        try:
+            s["certificate"] = make_protected.canonical_cert(s.get("certificate", []))
+        except make_protected.ProtectedError as exc:
+            raise Reject(f"scored.certificate: {exc}")
     return m
 
 
 # ---- the protected module ---------------------------------------------------------------------------
-def build_protected(net_json: Path, claimed: int, work: Path, lean: Path, lp: list[str], mode: str) -> dict:
+def build_protected(net_json: Path, claimed: int, work: Path, lean: Path, lp: list[str], mode: str,
+                    cert: list | None = None) -> dict:
     """Write, compile and verify the protected module; returns {module, olean, ...}. Cached by content."""
     sys.path.insert(0, str(HERE))
     try:
@@ -308,7 +354,7 @@ def build_protected(net_json: Path, claimed: int, work: Path, lean: Path, lp: li
         sys.path.pop(0)
     net = json.loads(net_json.read_text())
     try:
-        name, src = make_protected.render(net, claimed)
+        name, src = make_protected.render(net, claimed, cert)
     except make_protected.ProtectedError as exc:
         if "not supported" in str(exc):
             raise Unsupported(str(exc))
@@ -325,6 +371,7 @@ def build_protected(net_json: Path, claimed: int, work: Path, lean: Path, lp: li
     (ws / "Protected").mkdir(parents=True)
     srcp = ws / "Protected" / f"{name}.lean"
     srcp.write_text(src)
+    (ws / "cert.json").write_text(json.dumps(cert or []))
     res = compile_module(ws, ws, module, srcp, lean, lp, mode)
     if res["timed_out"]:
         raise Infra("compiling the protected module timed out")
@@ -361,6 +408,7 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
     receipt = {"schema": RECEIPT_SCHEMA, "candidate_id": None, "status": None, "reason": None,
                "certified_count": None, "domain_size": None, "claimed_count": None, "network": None,
                "theorem": None, "axioms": None, "isolation": None, "steps": [], "digests": {},
+               "scoring": {"status": "not_requested"},
                "seconds": None, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     ws = None
     try:
@@ -384,7 +432,10 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
         # the network and the protected target
         net_json = export_network(repo, manifest["model"], manifest["network"], work)
         receipt["digests"]["network_file"] = sha256_file(net_json)
-        prot = build_protected(net_json, manifest["claimed_count"], work, lean, lp, mode)
+        scored = manifest.get("scored")
+        receipt["digests"]["policy"] = policy_digest()
+        prot = build_protected(net_json, manifest["claimed_count"], work, lean, lp, mode,
+                               scored["certificate"] if scored else None)
         receipt["domain_size"] = prot["domain"]
         receipt["steps"].append({"step": "protected", "module": prot["module"], "cached": prot["cached"]})
         deps = {m: check_imports(p.read_text(), m, set(modules), prot["module"]) for m, p in modules.items()}
@@ -431,6 +482,8 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
             raise Reject(f"the proof depends on axioms that are not allowed: {', '.join(bad)}")
         receipt.update(status="accepted", certified_count=manifest["claimed_count"],
                        replayed_constants=last.get("replayed"))
+        if scored:
+            receipt["scoring"] = score(scored, manifest, prot, net_json, trusted, oleans, ws, env, mode, lean, lp_all, receipt)
     except Reject as exc:
         receipt.update(status="rejected", reason=str(exc))
     except Unsupported as exc:
@@ -438,6 +491,73 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
     except Infra as exc:
         receipt.update(status="error", reason=str(exc))
     return finish(receipt, work, t0)
+
+
+def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: list[str], oleans: list[str], ws: Path,
+          env: dict, mode: str, lean: Path, lp_all: list[str], receipt: dict) -> dict:
+    """The scored path, after verification: the closure check, the kernel's two challenges, the budgets, the
+    length. Returns the receipt's `scoring` block; never raises for the candidate's faults."""
+    net = json.loads(net_json.read_text())
+    extract = sum(len(w["ints"]) for w in net["weights"])
+    read = len(scored["certificate"])
+    out = {"status": None, "reason": None, "bill": None, "extract": extract, "read": read, "length": None,
+           "literals": None, "literal_budget": literal_budget(extract), "general_kernel_ms": None,
+           "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS, "rest_kernel_ms": None, "axioms": None}
+    read_extra = [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all
+    # the checker touches numbers only through the counted primitives
+    cmd = [str(acceptcheck_binary()), "closure", scored["checker"], str(ALLOWLIST), prot["module"]] + trusted + ["--"] + oleans
+    chk = run_boxed(ws, cmd, env, mode, CHECK_TIMEOUT_S, read_extra)
+    receipt["steps"].append({"step": "closure", "rc": chk["rc"], "seconds": chk["seconds"], "timed_out": chk["timed_out"]})
+    last = last_json(chk["stdout"])
+    if chk["timed_out"] or chk["rc"] != 0 or last is None:
+        raise Infra(f"acceptcheck closure failed: {(chk['stdout'] + chk['stderr'])[-1500:]}")
+    if last.get("status") != "ok":
+        out.update(status="refused", reason="the checker uses constants outside the counted language: "
+                   + ", ".join(last.get("offending") or []) + (f" ({last['reason']})" if last.get("reason") else ""))
+        return out
+    out["closure_visited"] = last.get("visited")
+    # the kernel: the soundness shape and the instance
+    cmd = [str(acceptcheck_binary()), "score", prot["module"], scored["checker"], scored["sound"], scored["instance"],
+           str(manifest["claimed_count"]), str(scored["claimed_bill"])] + trusted + ["--"] + oleans
+    chk = run_boxed(ws, cmd, env, mode, CHECK_TIMEOUT_S, read_extra)
+    receipt["steps"].append({"step": "score", "rc": chk["rc"], "seconds": chk["seconds"], "timed_out": chk["timed_out"]})
+    if chk["timed_out"]:
+        out.update(status="timeout", reason=f"the scored kernel check exceeded {CHECK_TIMEOUT_S} s")
+        return out
+    last = last_json(chk["stdout"])
+    if chk["rc"] != 0 or last is None:
+        raise Infra(f"acceptcheck score failed: {(chk['stdout'] + chk['stderr'])[-1500:]}")
+    if last.get("status") != "accepted":
+        out.update(status="refused", reason=last.get("reason") or "the kernel rejected the scored submission")
+        return out
+    axioms = list(last.get("axioms") or [])
+    out["axioms"] = axioms
+    bad = sorted(set(axioms) - ALLOWED_AXIOMS)
+    if bad:
+        out.update(status="refused", reason=f"the scored proofs depend on axioms that are not allowed: {', '.join(bad)}")
+        return out
+    general, rest = last.get("general") or {}, last.get("rest") or {}
+    out.update(literals=general.get("literals"), general_kernel_ms=general.get("kernel_ms"), rest_kernel_ms=rest.get("kernel_ms"),
+               general_constants=general.get("constants"))
+    if out["literals"] is None or out["literals"] > out["literal_budget"]:
+        out.update(status="refused", reason=f"the general layer's literal weight {out['literals']} exceeds the budget {out['literal_budget']}")
+        return out
+    if out["general_kernel_ms"] is None or out["general_kernel_ms"] > GENERAL_KERNEL_BUDGET_MS:
+        out.update(status="refused", reason=f"replaying the general layer took {out['general_kernel_ms']} ms, over the budget {GENERAL_KERNEL_BUDGET_MS} ms")
+        return out
+    # the length, in cost-v3 units
+    out.update(status="scored", bill=scored["claimed_bill"], length=scored["claimed_bill"] + extract + read)
+    return out
+
+
+def policy_digest() -> str:
+    """A digest of the scoring policy: the allowlist and the budgets."""
+    h = hashlib.sha256()
+    h.update(ALLOWLIST.read_bytes() if ALLOWLIST.exists() else b"")
+    h.update(json.dumps({"literal_budget": [LITERAL_BUDGET_BASE, LITERAL_BUDGET_PER_PARAM],
+                         "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS,
+                         "allowed_axioms": sorted(ALLOWED_AXIOMS), "trusted_prefixes": TRUSTED_PREFIXES}).encode())
+    return h.hexdigest()[:16]
 
 
 def finish(receipt: dict, work: Path, t0: float) -> dict:
@@ -478,6 +598,7 @@ def main(argv=None) -> int:
     p.add_argument("--repo", type=Path, required=True)
     p.add_argument("--work", type=Path, required=True)
     p.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
+    p.add_argument("--certificate", type=Path, help="a JSON list of numbers, for a scored submission's module")
     args = ap.parse_args(argv)
     global _repo
     _repo = args.repo.resolve()
@@ -486,7 +607,8 @@ def main(argv=None) -> int:
         print(json.dumps(r, indent=1))
         return 0 if r["status"] == "accepted" else 1
     mode = box_mode(args.mode)
-    r = build_protected(args.network.resolve(), args.claimed, args.work.resolve(), lean_binary(), lean_path(), mode)
+    cert = json.loads(args.certificate.read_text()) if args.certificate else None
+    r = build_protected(args.network.resolve(), args.claimed, args.work.resolve(), lean_binary(), lean_path(), mode, cert)
     print(json.dumps(r, indent=1))
     return 0
 

@@ -75,6 +75,11 @@ instance : Monad CostM where
 /-- Run a checker from an empty bill: the result and the bill, if every primitive was used properly. -/
 def exec (x : CostM α) (env : Env) : Option (α × Cost) := x.run env []
 
+/-- The result and the bill's total: what a scored submission's instance theorem states,
+    `CostM.billed D ⟨weights, cert⟩ = some (n, L)`. -/
+def billed (x : CostM α) (env : Env) : Option (α × Nat) :=
+  (x.exec env).map fun p => (p.1, p.2.total)
+
 /-- Fail: the checker certifies nothing. -/
 def fail : CostM α := ⟨fun _ _ => none⟩
 

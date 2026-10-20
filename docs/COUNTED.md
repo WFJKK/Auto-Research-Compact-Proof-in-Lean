@@ -1,79 +1,117 @@
-# The counted language (design, step 2 of the open lane)
+# The counted language (step 2 of the open lane)
 
 How a scored open-lane proof gets a length: its checker `D` is written against a monad whose only way to
-touch a number is a charged primitive, and a mechanical check of `D`'s definition makes sure of it.
+touch a number of the network is a charged primitive, a mechanical check of `D`'s definition makes sure of
+it, and the kernel evaluates `D` on the protected weights.
 
 ## The problem
 
-Length must be the operation count of `cost-v3`, not time, and the interpreter must control the bill: `D`
-must not be an arbitrary Lean function that reports how much work it did. A deep embedding (an inductive
-`Prog` with an interpreter) does that but makes every `D` and every proof about it painful. A plain monad does
-not do it: a `StateM Nat` computation can call any pure Lean function for free, including one that inspects
-the weights.
+Length must be the operation count of `cost-v3`, not time, and the service must control the bill: `D` must
+not be an arbitrary Lean function that reports how much work it did. A plain monad does not do it: a
+`StateM Nat` computation can call any pure Lean function for free, including one that inspects the weights.
 
-## The design
+## The design (`Counted.lean`, `CountedOps.lean`)
 
 - `Q`: a structure around `ℚ`. In theorems it is transparent (`Q.val`); in `D` it is sealed by the check
   below, so `D` can only make and combine `Q` values through the primitives.
 - `CostM α`: a structure around `Env → Cost → Option (α × Cost)`, with its own `Monad` instance. `Env`
   holds the weights and the certificate; `Cost` is the bill, by category. `D : CostM Nat` takes no
   argument: it reaches the weights and the certificate only through the primitives. (A structure, not a
-  function type, so that `D` cannot be written as `fun env cost => ...`.)
+  function type, so that `D` cannot be written as `fun env cost => ...`: `CostM.mk` and `CostM.run` are
+  not on the allowlist.)
 - Primitives, each with a fixed charge from `cost-v3`:
   - `qadd`, `qsub`, `qmuladd`, `qneg`, `qmin`, `qmax`: 1 each; `qlt`, `qle`, `qeq`: 1 each, returning `Bool`;
   - `weight name i : CostM Q`: free (the weights are charged once per proof, as `extract`, E);
   - `cert i : CostM Q`: free (the certificate is charged once per proof, as `read`, 1 per number);
   - `lit n : CostM Q` for a numeral: 1 (as a number read from the proof file);
-  - `expLo`, `expHi`: the exponential's enclosure (`Exp.lean`), charged as `cost-v3` charges `exp`;
-  - `charge category n`: adds to the bill (a program can only make itself longer; this is how a port
-    mirrors structural charges such as `tree`).
+  - `qexp`: the exponential's enclosure (`Exp.lean`), charged 3, as `cost-v3` charges a softmax entry;
+  - `charge category n`: adds to the bill (a program can only make itself longer).
   - loops, conditionals, `Nat`, `Bool`, lists and arrays: ordinary Lean, free, as the Python checker's
     bookkeeping is free. There is no bridge from `Q` to `Nat` except a charged comparison to `Bool`.
-- `exec D env : Option (Nat × Cost)`: the result and the bill, plus E and the certificate's size.
+- Counted operations (`CountedOps.lean`): the checker's own rules as charged calls, each with a
+  specification lemma. `CostM.single graph task x` runs the single-input rule and charges `singleCost`
+  (one exact forward pass and the comparison, exactly what `cost-v3` charges a `single` leaf);
+  `CostM.interval graph task box` runs the interval rule on a box and charges `intervalCost`. A scored
+  checker composes these; a checker written from the arithmetic primitives alone is possible but has to
+  reproduce the rules' arithmetic itself.
+- `exec D env : Option (Nat × Cost)`: the result and the bill; `billed D env : Option (Nat × Nat)`: the
+  result and the bill's total, which is what the instance theorem states.
 
-## The check
+## The check (`acceptcheck closure`)
 
 The service walks the constants `D` uses, transitively through the candidate's own definitions (not into
 proofs: a theorem computes nothing), and requires every other constant to be on an allowlist
-(`accept/allowlist.txt`, part of the trusted base). The allowlist holds the primitives, `CostM`'s `bind` and
-`pure`, and the pure structural functions of core Lean on `Nat`, `Bool`, `List`, `Array`, `Option`, `Prod`,
-`Fin` and `String` that the ported rules use. Not on it, so not available to `D`: `Q.val`, `Q.mk`, `Q.rec`,
-`CostM.mk`, `CostM.run`, anything of `ℚ` or `ℝ`, `StateT`'s `get` and `set`, `ReaderT.read`. A `D` that uses
-anything else is refused scoring, with the names listed; the proof may still be accepted as mathematically
-verified.
+(`accept/allowlist.txt`, part of the trusted base and of the policy digest). The allowlist holds the
+primitives, the counted operations, `CostM`'s `bind` and `pure`, the structural functions of core Lean on
+`Nat`, `Bool`, `List`, `Array`, `Option`, `Prod`, `Fin` and `String`, and the checker's own structural
+types (inputs, boxes, the task's shape). The protected module's `graph` and `task` are allowed (the
+soundness statement mentions them); its `weights`, `cert`, `claimedCount` and `Target` are not. Not on
+the list: `Q.val`, `Q.mk`, `CostM.mk`, `CostM.run`, anything of `ℚ` or `ℝ`. A `D` that uses anything
+else is refused scoring, with the names listed; the proof stays verified.
 
-Why this is enough: every number of the network enters `D` as a `Q` from `weight`, every number of the
-certificate as a `Q` from `cert`, every constant through `lit`, and `Q` values can only be combined by the
-charged primitives or turned into a `Bool` by a charged comparison. Free computation on `Nat` and `Bool`
-cannot read a `Q`. So every operation on a value of the network is on the bill. The `Monad` instance is
-ours, so `do` notation desugars to our `bind`.
+Why this is enough: every number of the network enters `D` as a `Q` from `weight` or through a counted
+operation, every number of the certificate as a `Q` from `cert`, every constant through `lit`, and `Q`
+values can only be combined by the charged primitives or turned into a `Bool` by a charged comparison.
+Free computation on `Nat` and `Bool` cannot read a `Q`. So every operation on a value of the network is
+on the bill. The `Monad` instance is ours, so `do` notation desugars to our `bind`.
 
-## Soundness, the fixed shape
+## The two statements (`acceptcheck score`)
 
-    theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+The service builds both statements itself and asks the kernel to accept the candidate's theorems at
+exactly these types, as it does for the target:
+
+    Challenge.sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
         CostM.exec D ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task
 
-The service builds this statement itself from `D`, `graph` and `task` and asks the kernel to accept the
-candidate's theorem at that type, as it does for the target. Proofs about `D` use `run_bind`, `run_pure` and
-one lemma per primitive (`(qadd a b).val = a.val + b.val`, and so on), which the library proves once.
+    Challenge.instance : CostM.billed D ⟨weights, cert⟩ = some (claimedCount, claimedBill)
 
-## The instance, two tiers
+The instance is always kernel-checked (`decide +kernel` in the candidate; the service never runs
+candidate code). Proofs about `D` use `run_bind`, `run_pure`, the operations' specification lemmas
+(`single_spec`, `interval_spec`) and `exec_of_billed`, which turns the instance into the hypothesis of
+soundness, so the target follows inside the candidate.
 
-- `compiled`: the service runs `exec D ⟨weights, cert⟩` with the compiled interpreter (`acceptcheck run`) and
-  records `n` and the bill. The trust is the Lean compiler's, as for `compactcheck`.
-- `kernel`: the candidate proves `exec D ⟨weights, cert⟩ = some (n, cost)` by `decide +kernel`, and the target
-  follows inside Lean. Feasible on small networks; the receipt says which tier was reached.
+## The manifest and the receipt
 
-## Reproduction
+A scored submission adds to its manifest
 
-`single`, `skip`, `interval`, `contract`, `symmetry` and `approximate` are ported as `CostM` programs that
-mirror the Python checker's loops, with a program `checkProofCounted : Cert → CostM Nat` that walks a
-split-tree proof file. The gate: on the four max2 baselines and every proof of the recorded max2 runs, the
-bill equals the Python length to the unit and the count equals the Python count. Their soundness comes from
-equivalence with `checkProof` (`Check.lean`), which is proved sound already.
+    "scored": {"checker": ..., "sound": ..., "instance": ..., "certificate": [numbers], "claimed_bill": L}
+
+The certificate (integers, floats, or `[p, q]` pairs) becomes the protected module's `cert`, and its hash
+becomes part of the module's name. The receipt's `scoring` block says `scored` or `refused` (with the
+reason), and gives the length in `cost-v3` units:
+
+    length = claimed_bill + extract + read,  extract = number of weight entries,  read = certificate size
+
+The mapping to `cost-v3`'s categories: `single` and `interval` through the counted operations, `extract`
+and `read` as above, the arithmetic categories through the primitives. `tree` has no counterpart: the
+structure of a scored proof is its program, bounded by the literal budget below rather than charged.
+
+## General-layer safeguards
+
+The general layer is the checker, its soundness proof and everything they depend on. Beyond the closure
+check, the service enforces, as policy (recorded in the receipt's policy digest):
+
+- no reference to a protected constant other than `graph` and `task` from the general layer
+  (`acceptcheck score` rejects it; the closure check catches it in `D` first);
+- a literal budget: the literal weight of the general layer (1 per 16 bits of a natural number literal,
+  1 per 2 bytes of a string literal, over the statements of all its constants and the bodies of its
+  definitions, not of its proofs) is at most `32 + E / 8`. A copy of the weights costs at least about
+  `2 E`, so it cannot fit, while a general checker needs a handful;
+- a kernel budget: replaying the general layer (timed on its own, before the rest) takes at most 120 s.
+
+These bound what the general layer can hide; they do not prove that nothing is hidden. The adversarial
+tests in `scripts/test_accept.py` say so in their names.
+
+## Reproduction (`CountedCheck.lean`, `compactcheck cost`)
+
+`checkProofCounted` walks a split-tree proof file as `checkProof` does and bills it with `cost-v3`'s
+formulas, category by category: `extract`, `read`, `tree`, `single`, `interval`, `contract`,
+`approximate`, `symmetry`. The gate: on the four max2 baselines and every proof of the recorded max2 runs,
+the bill equals the Python length to the unit and the count equals the Python count
+(`scripts/test_cost.py`). Its soundness comes from the count being `checkProof`'s, which is proved sound.
 
 ## What stays open
 
-The general-layer safeguards (no reference to the protected constants outside the instance, a literal
-budget, a kernel budget over the new dependency closure) and the adversarial tests are part of the same
-step; the anti-hiding property itself is an obligation, not a theorem.
+`token_interval` and `token_convex` as counted operations (needed to reproduce the attention
+frontiers, not for this slice); the `interval` operation with an approximation; a literal budget
+calibrated on more than the brute-force example.

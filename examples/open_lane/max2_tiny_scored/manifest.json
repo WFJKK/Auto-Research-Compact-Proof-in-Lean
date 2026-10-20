@@ -1,0 +1,5 @@
+{"schema": "open-lane-candidate-v1", "candidate_id": "max2-tiny-scored", "model": "tests/max2_tiny",
+ "network": "max2_tiny-v8-s0", "claimed_count": 64, "theorem": "Candidate.Max2TinyScored.performance",
+ "modules": ["Candidate/Max2TinyScored.lean"],
+ "scored": {"checker": "Candidate.Max2TinyScored.D", "sound": "Candidate.Max2TinyScored.D_sound",
+            "instance": "Candidate.Max2TinyScored.D_instance", "certificate": [], "claimed_bill": 4032}}

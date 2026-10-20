@@ -2,6 +2,7 @@ import CompactCheck.Tutorial
 import CompactCheck.Walk
 import CompactCheck.Counted
 import CompactCheck.CountedCheck
+import CompactCheck.CountedOps
 import CompactCheck.LinAlg
 import CompactCheck.LinAlgTest
 import CompactCheck.LinAlgRandomTest
