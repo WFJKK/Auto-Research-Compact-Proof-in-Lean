@@ -109,9 +109,11 @@ check, the service enforces, as policy (recorded in the receipt's policy digest)
 - no reference to a protected constant other than `graph` and `task` from the general layer
   (`acceptcheck score` rejects it; the closure check catches it in `D` first);
 - a literal budget: the literal weight of the general layer (1 per 16 bits of a natural number literal,
-  1 per 2 bytes of a string literal, over the statements of all its constants and the bodies of its
-  definitions, not of its proofs) is at most `32 + E / 8`. A copy of the weights costs at least about
-  `2 E`, so it cannot fit, while a general checker needs a handful;
+  1 per 8 bytes of a string literal, over the statements of the author's constants and the bodies of the
+  author's definitions; not proofs, not Lean's equation lemmas, not the compiler's auxiliaries such as
+  `match_1`, `_proof_1_3` or `_sparseCasesOn_1`, which repeat what the author wrote) is at most
+  `32 + E / 8`. A copy of the weights costs at least about `2 E`, so it cannot fit, while a general
+  checker needs a handful: the pilot's column proof weighs 16;
 - a kernel budget: replaying the general layer (timed on its own, before the rest) takes at most 120 s.
 
 These bound what the general layer can hide; they do not prove that nothing is hidden. The adversarial

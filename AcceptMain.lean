@@ -245,9 +245,10 @@ partial def dependencyClosure (cs : Std.HashMap Name ConstantInfo) (roots : List
   return visited
 
 /-- The literal weight of an expression: per natural number literal, 1 per 16 bits (so a weight's mantissa
-    costs about 2 and a packed word costs more); per string literal, 1 per 2 bytes; a numeral
-    `OfNat.ofNat _ n _` counted once. This is what the general layer's literal budget bounds: free data in
-    the layer's statements and definitions, a copy of the weights above all. -/
+    costs about 2 and a packed word costs more); per string literal, 1 per 8 bytes (a weight's name costs
+    2 or 3, a table hidden in a string costs its length); a numeral `OfNat.ofNat _ n _` counted once. This
+    is what the general layer's literal budget bounds: free data in the layer's statements and
+    definitions, a copy of the weights above all. -/
 partial def litWeight (e : Expr) : Nat :=
   go e |>.run' {}
 where
@@ -255,7 +256,7 @@ where
     if let some n := (← get).get? e then return n
     let n ← match e with
       | .lit (.natVal n) => pure (max 1 ((Nat.log2 n + 1 + 15) / 16))
-      | .lit (.strVal s) => pure (max 1 ((s.utf8ByteSize + 1) / 2))
+      | .lit (.strVal s) => pure (max 1 ((s.utf8ByteSize + 7) / 8))
       | .app .. =>
         let f := e.getAppFn
         let args := e.getAppArgs
@@ -284,9 +285,28 @@ def isProof (env : Environment) (ci : ConstantInfo) : Bool :=
     | _ => false
   | .error _ => false
 
+/-- Lean's own equation lemmas of a definition (`f.eq_1`, `f.eq_def`, `f.eq_unfold`, ...): their statements
+    repeat the definition's body, which is counted once already. -/
+def isEquationLemma (n : Name) : Bool :=
+  match n with
+  | .str _ s => s == "eq_def" || s == "eq_unfold" || (s.startsWith "eq_" && (s.drop 3).all Char.isDigit && s.length > 3)
+  | _ => false
+
+/-- A constant the compiler made rather than the author: a private or internal name (a component starting
+    with `_`, such as `_proof_1_3` and `_sparseCasesOn_1`), a `match_n` or `proof_n` auxiliary, a splitter.
+    Their statements repeat what the author's definitions and proofs already hold. -/
+def isCompilerMade (n : Name) : Bool :=
+  n.components.any fun c => match c with
+    | .str _ s => s.startsWith "_" || s == "splitter" ||
+        ((s.startsWith "match_" && (s.drop 6).all (fun ch => ch.isDigit || ch == '_') && s.length > 6)) ||
+        ((s.startsWith "proof_" && (s.drop 6).all (fun ch => ch.isDigit || ch == '_') && s.length > 6))
+    | _ => false
+
 /-- The literal weight of a constant: its statement, and its body unless it is a proof (a proof term
-    proves its statement and nothing else; what it computes is bounded by the kernel budget). -/
+    proves its statement and nothing else; what it computes is bounded by the kernel budget). An
+    equation lemma or a compiler-made auxiliary weighs nothing. -/
 def constLitWeight (env : Environment) (ci : ConstantInfo) : Nat :=
+  if isEquationLemma ci.name || isCompilerMade ci.name then 0 else
   litWeight ci.type + (if isProof env ci then 0 else match ci.value? with | some v => litWeight v | none => 0)
 
 /-- Replay a set of the candidate's constants into the kernel environment, timed. -/

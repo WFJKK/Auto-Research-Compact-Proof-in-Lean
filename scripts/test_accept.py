@@ -24,6 +24,7 @@ HERE = Path(__file__).resolve().parent
 PROJECT = HERE.parent
 EXAMPLE = PROJECT / "examples" / "open_lane" / "max2_tiny_brute"
 SCORED = PROJECT / "examples" / "open_lane" / "max2_tiny_scored"
+AGENT = PROJECT / "examples" / "open_lane" / "max2_tiny_agent_cols23"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -355,3 +356,16 @@ def test_the_development_compile_reports_errors_and_never_accepts(work, tmp_path
     out = json.loads(r.stdout)
     assert r.returncode == 0 and out["ok"] is True
     assert not list((work / "receipts").glob("*Dev*"))  # a compile is not a submission
+
+
+def test_the_agents_pilot_proof_is_verified_and_scored(work):
+    """The pilot's third submission of round 1 (20 October 2026), kept as the agent wrote it: the columns of
+    M = U L E, 23 of 64 inputs for a bill of 458. Under the first policy its literal weight came out at 97
+    (equation lemmas and compiler-made auxiliaries counted, strings charged per 2 bytes); the author's own
+    literals weigh 16."""
+    r = submit(AGENT, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 23, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 458 and s["length"] == 538 and s["literals"] == 16 and s["literals"] <= s["literal_budget"]
+    assert r["score_eligible"] is True and r["execution_assurance"] == "kernel_checked_instance"
