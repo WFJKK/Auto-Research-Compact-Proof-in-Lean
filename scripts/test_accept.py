@@ -369,3 +369,53 @@ def test_the_agents_pilot_proof_is_verified_and_scored(work):
     assert s["status"] == "scored", s["reason"]
     assert s["bill"] == 458 and s["length"] == 538 and s["literals"] == 16 and s["literals"] <= s["literal_budget"]
     assert r["score_eligible"] is True and r["execution_assurance"] == "kernel_checked_instance"
+
+
+# ---- the handoff's remaining fixtures ----------------------------------------------------------------------
+def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_anti_hiding(work, tmp_path):
+    """A copy of the weights encoded in a single big natural number (24 bits each) in a general-layer
+    definition: the literal measure charges 1 per 16 bits, so the copy weighs about 1.5 per weight and cannot
+    fit the budget 32 + E/8."""
+    sys.path.insert(0, str(HERE))
+    import accept
+    sys.path.pop(0)
+    accept._repo = REPO
+    net = json.loads(accept.export_network(REPO, "tests/max2_tiny", "max2_tiny-v8-s0", work).read_text())
+    nums = [abs(v) % (1 << 24) for w in net["weights"] for v in w["ints"]]
+    packed = 0
+    for v in nums:
+        packed = (packed << 24) | v
+    table = f"def packed : Nat := {packed}\n\ndef unpack (n k : Nat) : Nat := (n >>> (24 * k)) % (1 <<< 24)\n\n"
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (allInputs task.space)",
+                                table + "/-- The checker: every input of the task's space. -/\ndef D : CostM Nat := countSingles (if unpack packed 0 = 0 then [] else allInputs task.space)")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide : ¬ unpack packed 0 = 0)] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+    r = submit(scored_variant(tmp_path, "weights-packed", src), work)
+    if r["status"] == "rejected" and "does not compile" in r["reason"]:
+        pytest.skip("the packed variant did not compile on this toolchain: " + r["reason"][-300:])
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "literal weight" in s["reason"], s
+    assert s["literals"] >= len(nums)
+
+
+def test_option_overrides_in_the_candidate_do_not_reach_the_service(work, tmp_path):
+    """A candidate may raise its own elaboration limits; the service's budgets are measured by the service
+    (kernel time of the replay, literal weight), so the submission is scored exactly as without them."""
+    src = SCORED_SOURCE.replace("/-- The kernel runs the single rule on all 64 inputs",
+                                "set_option maxHeartbeats 0 in\nset_option maxRecDepth 100000 in\n/-- The kernel runs the single rule on all 64 inputs")
+    assert src != SCORED_SOURCE
+    r = submit(scored_variant(tmp_path, "options", src), work)
+    assert r["status"] == "accepted" and r["scoring"]["status"] == "scored" and r["scoring"]["length"] == 4112, r
+
+
+def test_a_candidate_cannot_change_its_sources_during_evaluation(work, tmp_path):
+    """The sources the service compiles are its own copy, read-only in the box: a candidate that tries to
+    rewrite them while compiling fails to compile, and the copy is what was submitted."""
+    src = SOURCE.replace("namespace Candidate.Max2Tiny",
+                         '#eval IO.FS.writeFile "Candidate/Max2Tiny.lean" "theorem Candidate.Max2Tiny.performance : True := trivial"\n\nnamespace Candidate.Max2Tiny')
+    d = variant(tmp_path, "race", lean=src)
+    r = submit(d, work)
+    assert r["status"] == "rejected" and "does not compile" in r["reason"], r["reason"]
+    copies = sorted((work / "submissions").glob("race-*/Candidate/Max2Tiny.lean"))
+    assert copies and copies[-1].read_text() == src
