@@ -70,6 +70,19 @@ candidate code). Proofs about `D` use `run_bind`, `run_pure`, the operations' sp
 (`single_spec`, `interval_spec`) and `exec_of_billed`, which turns the instance into the hypothesis of
 soundness, so the target follows inside the candidate.
 
+## Why the reported cost is the cost
+
+Proving that a checker's count is right says nothing about its bill, so the bill is never reported by the
+candidate: the instance theorem `CostM.billed D ⟨weights, cert⟩ = some (n, L)` is accepted by the kernel at
+a statement the service builds, so `L` is what the monad's semantics charges on the protected weights, as
+the kernel computes it. What makes that charge the whole cost is the closure check above: every number of
+the network or the certificate reaches `D` as a sealed `Q` through a charged primitive or a counted
+operation, nothing on the allowlist can open a `Q`, and free computation on `Nat` and `Bool` cannot read
+one, so no chargeable work can happen outside the bill. The general-layer budgets bound what the free part
+can carry. A receipt's `execution_assurance` is `kernel_checked_instance` for this reason: the count and the
+bill are both kernel-checked for the exact checker, certificate and weights; nothing of a candidate is ever
+executed by the service.
+
 ## The manifest and the receipt
 
 A scored submission adds to its manifest
@@ -77,8 +90,10 @@ A scored submission adds to its manifest
     "scored": {"checker": ..., "sound": ..., "instance": ..., "certificate": [numbers], "claimed_bill": L}
 
 The certificate (integers, floats, or `[p, q]` pairs) becomes the protected module's `cert`, and its hash
-becomes part of the module's name. The receipt's `scoring` block says `scored` or `refused` (with the
-reason), and gives the length in `cost-v3` units:
+becomes part of the module's name. The receipt's `claim_kind` is `performance` (a proof of Target) or
+`auxiliary` (a lemma with any statement, accepted with no count and no score: `"kind": "auxiliary"` in the
+manifest), `score_eligible` says whether it was scored, and the `scoring` block says `scored` or `refused`
+(with the reason) and gives the length in `cost-v3` units:
 
     length = claimed_bill + extract + read,  extract = number of weight entries,  read = certificate size
 

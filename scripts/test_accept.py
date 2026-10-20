@@ -267,3 +267,91 @@ def test_a_checker_outside_the_counted_language_is_refused_scoring(work, tmp_pat
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
     assert s["status"] == "refused" and "CostM.mk" in s["reason"] and "CostM.run" in s["reason"], s
+
+
+# ---- kinds, assurance, zero coverage, the development compile --------------------------------------------
+def test_an_auxiliary_lemma_is_accepted_without_a_count(work, tmp_path):
+    r = submit(variant(tmp_path, "aux-lemma", manifest={"kind": "auxiliary", "theorem": "Candidate.Max2Tiny.D_sound"}), work)
+    assert r["status"] == "accepted", r["reason"]
+    assert r["claim_kind"] == "auxiliary" and r["certified_count"] is None and r["score_eligible"] is False
+    assert "numCorrect" in r["statement"] and set(r["axioms"]) <= {"propext", "Classical.choice", "Quot.sound"}
+    r = submit(variant(tmp_path, "aux-def", manifest={"kind": "auxiliary", "theorem": "Candidate.Max2Tiny.D"}), work)
+    assert r["status"] == "rejected" and "not a theorem" in r["reason"]
+
+
+def test_a_scored_proof_is_marked_kernel_checked(work):
+    r = submit(SCORED, work)
+    assert r["claim_kind"] == "performance" and r["score_eligible"] is True
+    assert r["execution_assurance"] == "kernel_checked_instance" and r["scoring"]["assurance"] == "kernel_checked_instance"
+    assert r["cost_model"] == "cost-v3"
+
+
+ZERO = """import Protected.N_max2_tiny_v8_s0_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+
+namespace Candidate.Zero
+open CompactCheck Protected.N_max2_tiny_v8_s0_c0
+
+def D : CostM Nat := pure 0
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec D ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  simp only [D, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
+  omega
+
+theorem D_instance : CostM.billed D ⟨weights, cert⟩ = some (0, 0) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.Zero
+"""
+
+
+def test_zero_coverage_is_accepted_and_scored_not_rejected(work, tmp_path):
+    d = variant(tmp_path, "zero", lean=ZERO, module_path="Candidate/Zero.lean", base=SCORED)
+    (d / "Candidate" / "Max2TinyScored.lean").unlink()
+    m = json.loads((d / "manifest.json").read_text())
+    m.update(claimed_count=0, theorem="Candidate.Zero.performance", modules=["Candidate/Zero.lean"],
+             scored={"checker": "Candidate.Zero.D", "sound": "Candidate.Zero.D_sound", "instance": "Candidate.Zero.D_instance",
+                     "certificate": [], "claimed_bill": 0})
+    (d / "manifest.json").write_text(json.dumps(m))
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 0, r["reason"]
+    assert r["scoring"]["status"] == "scored" and r["scoring"]["length"] == 80, r["scoring"]
+
+
+def test_an_invented_axiom_is_rejected(work, tmp_path):
+    src = SOURCE.replace("theorem performance : Target := by", "axiom cheat : Target\n\ntheorem performance : Target := cheat\n\ntheorem performance' : Target := by")
+    r = submit(variant(tmp_path, "axiom", lean=src), work)
+    assert r["status"] == "rejected" and "axioms that are not allowed" in r["reason"] and "cheat" in r["reason"]
+
+
+def test_a_soundness_proof_about_another_checker_is_refused_scoring(work, tmp_path):
+    """The manifest names D; the soundness theorem is about D2. The service builds the statement for D, so the
+    kernel rejects the candidate's theorem at that type: verified, not scored."""
+    src = SCORED_SOURCE.replace("/-! ## Specific layer -/", "def D2 : CostM Nat := pure 0\n\ntheorem D2_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),\n    CostM.exec D2 ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by\n  intro w c n cost h\n  simp only [D2, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h\n  omega\n\n/-! ## Specific layer -/")
+    d = scored_variant(tmp_path, "other-program", src)
+    m = json.loads((d / "manifest.json").read_text())
+    m["scored"]["sound"] = "Candidate.Max2TinyScored.D2_sound"
+    (d / "manifest.json").write_text(json.dumps(m))
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 64
+    assert r["scoring"]["status"] == "refused" and "Challenge.sound" in r["scoring"]["reason"], r["scoring"]
+
+
+def test_the_development_compile_reports_errors_and_never_accepts(work, tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "Candidate").mkdir(parents=True)
+    (ws / "Candidate" / "Dev.lean").write_text(SCORED_SOURCE.replace("decide +kernel", "exact rfl"))
+    cmd = [sys.executable, "-B", str(HERE / "accept.py"), "compile", str(ws), "Candidate/Dev.lean", "--repo", str(REPO),
+           "--work", str(work), "--model", "tests/max2_tiny", "--network", "max2_tiny-v8-s0", "--claimed", "64"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    out = json.loads(r.stdout)
+    assert r.returncode == 1 and out["ok"] is False and "error" in out["messages"].lower() and out["protected_module"].endswith("_c64")
+    (ws / "Candidate" / "Dev.lean").write_text(SCORED_SOURCE)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    out = json.loads(r.stdout)
+    assert r.returncode == 0 and out["ok"] is True
+    assert not list((work / "receipts").glob("*Dev*"))  # a compile is not a submission

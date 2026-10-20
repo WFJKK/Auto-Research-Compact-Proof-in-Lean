@@ -43,9 +43,21 @@ layer (literal weight, kernel time), which the policy budgets below bound. The r
 whether the submission is scored and gives the length in cost-v3 units: the bill, plus `extract` (one per
 weight entry) and `read` (one per certificate number). A submission refused scoring stays verified.
 
+A manifest with "kind": "auxiliary" submits a lemma instead of a proof of Target: `theorem` may have any
+statement; it is compiled, replayed and axiom-checked the same way (`acceptcheck lemma`), and accepted with
+no count and no score (claim_kind auxiliary in the receipt). The receipt's `claim_kind`, `score_eligible`
+and `execution_assurance` say what a result is: a scored result's count and bill are both kernel-checked
+(`kernel_checked_instance`); nothing of a candidate is ever executed.
+
     python3 scripts/accept.py protected <network.json> <claimed> --work <work dir> [--certificate c.json]
 
 builds and checks a protected module alone (for tests, and for a candidate's own development).
+
+    python3 scripts/accept.py compile <workspace> Candidate/<Name>.lean --repo R --work W --model M --network N
+                              --claimed C [--certificate c.json]
+
+compiles a module of a candidate's workspace in the box against that protected module, for development: the
+pipeline's `lean_check` tool is this call. Its output is never evidence.
 """
 
 from __future__ import annotations
@@ -67,6 +79,9 @@ SCHEMA = "open-lane-candidate-v1"
 RECEIPT_SCHEMA = "open-lane-receipt-v1"
 ALLOWED_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 TRUSTED_PREFIXES = ("CompactCheck.", "Mathlib.")
+KINDS = ("performance", "auxiliary")  # a proof of Target, or a lemma: accepted with no count and no score
+COST_MODEL = "cost-v3"
+ASSURANCE = "kernel_checked_instance"  # a scored result's count and bill are both kernel-checked, never executed
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")
 COMPILE_TIMEOUT_S = 3600
@@ -294,6 +309,13 @@ def read_manifest(cdir: Path) -> dict:
     for key, typ in (("candidate_id", str), ("model", str), ("network", str), ("theorem", str), ("modules", list)):
         if not isinstance(m.get(key), typ):
             raise Reject(f"manifest field {key} must be a {typ.__name__}")
+    m["kind"] = m.get("kind", "performance")
+    if m["kind"] not in KINDS:
+        raise Reject(f"kind must be one of {KINDS}")
+    if m["kind"] == "auxiliary":
+        m.setdefault("claimed_count", 0)  # names the protected module the lemma may import; no claim is made
+        if "scored" in m:
+            raise Reject("an auxiliary submission cannot be scored")
     c = m.get("claimed_count")
     if not isinstance(c, int) or isinstance(c, bool) or c < 0:
         raise Reject("claimed_count must be a natural number")
@@ -406,15 +428,16 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
     _repo = repo
     t0 = time.time()
     receipt = {"schema": RECEIPT_SCHEMA, "candidate_id": None, "status": None, "reason": None,
-               "certified_count": None, "domain_size": None, "claimed_count": None, "network": None,
-               "theorem": None, "axioms": None, "isolation": None, "steps": [], "digests": {},
+               "claim_kind": None, "certified_count": None, "domain_size": None, "claimed_count": None, "network": None,
+               "theorem": None, "statement": None, "axioms": None, "isolation": None, "steps": [], "digests": {},
+               "score_eligible": False, "execution_assurance": None, "cost_model": COST_MODEL,
                "scoring": {"status": "not_requested"},
                "seconds": None, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     ws = None
     try:
         manifest = read_manifest(cdir)
-        receipt.update(candidate_id=manifest["candidate_id"], claimed_count=manifest["claimed_count"],
-                       network=manifest["network"], theorem=manifest["theorem"])
+        receipt.update(candidate_id=manifest["candidate_id"], claimed_count=manifest["claimed_count"] if manifest["kind"] == "performance" else None,
+                       network=manifest["network"], theorem=manifest["theorem"], claim_kind=manifest["kind"])
         mode = box_mode(want_mode)
         receipt["isolation"] = mode if mode == "landlock" else "process (weak: no Landlock here)"
         lean = lean_binary()
@@ -464,7 +487,10 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
         # the kernel
         trusted = [prot["module"]] + sorted({d for ds in deps.values() for d in ds if not d.startswith("Candidate.")})
         env = box_env(ws, lean, lp_all)
-        cmd = [str(acceptcheck_binary()), "check", prot["module"] + ".Target", manifest["theorem"]] + trusted + ["--"] + oleans
+        if manifest["kind"] == "auxiliary":
+            cmd = [str(acceptcheck_binary()), "lemma", manifest["theorem"]] + trusted + ["--"] + oleans
+        else:
+            cmd = [str(acceptcheck_binary()), "check", prot["module"] + ".Target", manifest["theorem"]] + trusted + ["--"] + oleans
         chk = run_boxed(ws, cmd, env, mode, CHECK_TIMEOUT_S, [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all)
         receipt["steps"].append({"step": "kernel", "rc": chk["rc"], "seconds": chk["seconds"], "timed_out": chk["timed_out"]})
         if chk["timed_out"]:
@@ -480,10 +506,15 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
         bad = sorted(set(axioms) - ALLOWED_AXIOMS)
         if bad:
             raise Reject(f"the proof depends on axioms that are not allowed: {', '.join(bad)}")
+        if manifest["kind"] == "auxiliary":
+            receipt.update(status="accepted", statement=last.get("statement"), replayed_constants=last.get("replayed"))
+            return finish(receipt, work, t0)
         receipt.update(status="accepted", certified_count=manifest["claimed_count"],
                        replayed_constants=last.get("replayed"))
         if scored:
             receipt["scoring"] = score(scored, manifest, prot, net_json, trusted, oleans, ws, env, mode, lean, lp_all, receipt)
+            if receipt["scoring"]["status"] == "scored":
+                receipt.update(score_eligible=True, execution_assurance=ASSURANCE)
     except Reject as exc:
         receipt.update(status="rejected", reason=str(exc))
     except Unsupported as exc:
@@ -500,7 +531,8 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     net = json.loads(net_json.read_text())
     extract = sum(len(w["ints"]) for w in net["weights"])
     read = len(scored["certificate"])
-    out = {"status": None, "reason": None, "bill": None, "extract": extract, "read": read, "length": None,
+    out = {"status": None, "reason": None, "assurance": ASSURANCE, "cost_model": COST_MODEL,
+           "bill": None, "extract": extract, "read": read, "length": None,
            "literals": None, "literal_budget": literal_budget(extract), "general_kernel_ms": None,
            "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS, "rest_kernel_ms": None, "axioms": None}
     read_extra = [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all
@@ -564,12 +596,40 @@ def finish(receipt: dict, work: Path, t0: float) -> dict:
     receipt["seconds"] = round(time.time() - t0, 1)
     if receipt["status"] != "accepted":
         receipt["certified_count"] = None
+        receipt["score_eligible"] = False
     rdir = work / "receipts"
     rdir.mkdir(parents=True, exist_ok=True)
     name = f"{receipt['candidate_id'] or 'invalid'}-{int(t0)}.json"
     (rdir / name).write_text(json.dumps(receipt, indent=1))
     receipt["receipt_path"] = str(rdir / name)
     return receipt
+
+
+def compile_for_development(ws: Path, rel: str, repo: Path, model: str, network: str, claimed: int, work: Path,
+                            want_mode: str, cert: list | None = None) -> dict:
+    """Compile <ws>/<rel> against the protected module of (network, claimed, certificate), in the box, with the
+    workspace's own out/ on the path for its other modules. For a candidate's development, never for acceptance:
+    returns {"ok", "timed_out", "module", "protected_module", "messages", "seconds"} or {"ok": False, "error"}."""
+    global _repo
+    _repo = repo
+    if not re.match(r"^Candidate/([A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*\.lean$", rel):
+        return {"ok": False, "error": "the module path must be Candidate/<Name>.lean"}
+    src = ws / rel
+    if src.is_symlink() or not src.is_file():
+        return {"ok": False, "error": f"{rel} is not a file of the workspace"}
+    try:
+        mode = box_mode(want_mode)
+        lean, lp = lean_binary(), lean_path()
+        net_json = export_network(repo, model, network, work)
+        prot = build_protected(net_json, claimed, work, lean, lp, mode, cert)
+    except (Reject, Unsupported, Infra) as exc:
+        return {"ok": False, "error": str(exc)}
+    module = "Candidate." + rel[len("Candidate/"):-len(".lean")].replace("/", ".")
+    (ws / "out").mkdir(exist_ok=True)
+    res = compile_module(ws, ws, module, src, lean, lp + [prot["lean_path_dir"], str(ws / "out")], mode)
+    text = (res["stdout"] + res["stderr"]).strip()
+    return {"ok": res["rc"] == 0 and not res["timed_out"], "timed_out": res["timed_out"], "module": module,
+            "protected_module": prot["module"], "messages": text, "seconds": round(res["seconds"], 1)}
 
 
 def project_digest() -> str:
@@ -592,6 +652,16 @@ def main(argv=None) -> int:
     s.add_argument("--repo", type=Path, required=True, help="the pipeline repository")
     s.add_argument("--work", type=Path, required=True, help="networks, protected modules, workspaces and receipts")
     s.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
+    c = sub.add_parser("compile", help="compile a candidate module in a workspace, for development")
+    c.add_argument("workspace", type=Path)
+    c.add_argument("module", help="Candidate/<Name>.lean, relative to the workspace")
+    c.add_argument("--repo", type=Path, required=True)
+    c.add_argument("--work", type=Path, required=True)
+    c.add_argument("--model", required=True)
+    c.add_argument("--network", required=True)
+    c.add_argument("--claimed", type=int, required=True)
+    c.add_argument("--certificate", type=Path)
+    c.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
     p = sub.add_parser("protected")
     p.add_argument("network", type=Path)
     p.add_argument("claimed", type=int)
@@ -606,6 +676,12 @@ def main(argv=None) -> int:
         r = submit(args.candidate.resolve(), _repo, args.work.resolve(), args.mode)
         print(json.dumps(r, indent=1))
         return 0 if r["status"] == "accepted" else 1
+    if args.cmd == "compile":
+        cert = json.loads(args.certificate.read_text()) if args.certificate else None
+        r = compile_for_development(args.workspace.resolve(), args.module, _repo, args.model, args.network, args.claimed,
+                                    args.work.resolve(), args.mode, cert)
+        print(json.dumps(r, indent=1))
+        return 0 if r.get("ok") else 1
     mode = box_mode(args.mode)
     cert = json.loads(args.certificate.read_text()) if args.certificate else None
     r = build_protected(args.network.resolve(), args.claimed, args.work.resolve(), lean_binary(), lean_path(), mode, cert)

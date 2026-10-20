@@ -39,6 +39,12 @@ and its literal weight is counted, for the service's budgets. The last line is
 `{"status": "accepted" | "rejected", "reason": ..., "axioms": [...], "replayed": n,
   "general": {"constants": k, "literals": l, "kernel_ms": ms}, "rest": {...}, "challenge_ms": ms}`.
 
+    acceptcheck lemma <theorem> <trusted modules...> -- <candidate .olean files...>
+
+An auxiliary submission: after the same replay, checks that `<theorem>` is a theorem whose statement is a
+proposition (by the kernel) and lists its axioms. The last line is `{"status", "reason", "statement",
+"axioms", "replayed"}`. No target is involved: the lemma proves whatever it states.
+
     acceptcheck closure <checker const> <allowlist file> <protected module> <trusted modules...> -- <candidate .olean files...>
 
 Walks the constants the checker uses, transitively through the candidate's own definitions (not into
@@ -177,6 +183,33 @@ def candidateConstants (kenv : Kernel.Environment) (oleans : List String) :
         return .error s!"the candidate declares {ci.name} twice"
       cs := cs.insert ci.name ci
   return .ok cs
+
+/-! ## An auxiliary lemma: replayed, a proposition, its axioms listed -/
+
+def runLemma (cand : Name) (trusted : List Name) (oleans : List String) : IO UInt32 := do
+  initSearchPath (← findSysroot)
+  let env ← importModules (trusted.toArray.map fun m => { module := m : Import }) {} (trustLevel := 0)
+  let kenv := env.toKernelEnv
+  let cs ← match ← candidateConstants kenv oleans with
+    | .ok cs => pure cs
+    | .error e => return ← rejected e
+  let kenv ← try Kernel.Environment.replay cs kenv
+    catch e => return ← rejected s!"the kernel rejects the candidate: {e}"
+  let some ci := kenv.find? cand | return ← rejected s!"the candidate has no constant {cand}"
+  unless ci matches .thmInfo _ do
+    return ← rejected s!"{cand} is not a theorem"
+  -- its statement is a proposition, by the kernel (so a `theorem` of a data type is not a lemma)
+  let isProp := match Kernel.check (Environment.ofKernelEnv kenv) {} ci.type with
+    | .ok sort => match Kernel.whnf (Environment.ofKernelEnv kenv) {} sort with
+      | .ok (.sort u) => u.isZero
+      | _ => false
+    | .error _ => false
+  unless isProp do
+    return ← rejected s!"the statement of {cand} is not a proposition"
+  let axioms := axiomsOf kenv cand
+  jsonOut [("status", "accepted"), ("reason", Json.null), ("statement", toString ci.type),
+    ("axioms", Json.arr (axioms.map fun a => Json.str a.toString)), ("replayed", Lean.toJson cs.size)]
+  return 0
 
 /-- The constants of the candidate that `roots` use, transitively through the candidate's constants
     (theorems included: this is a dependency closure, not the computational one of `runClosure`),
@@ -431,6 +464,7 @@ end Accept
 def usage : String :=
   "usage: acceptcheck check <target> <candidate const> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck score <protected module> <checker> <sound> <instance> <count> <bill> <trusted modules...> -- <candidate oleans...>\n" ++
+  "       acceptcheck lemma <theorem> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck closure <checker const> <allowlist> <protected module> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck protected <network.json> <protected module> <protected olean>"
 
@@ -462,6 +496,13 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln usage
       return 2
     Accept.runClosure root.toName allow prot.toName (trusted.map String.toName) oleans
+  | "lemma" :: cand :: rest =>
+    let (trusted, oleans) := rest.span (· != "--")
+    let oleans := oleans.drop 1
+    if oleans.isEmpty then
+      IO.eprintln usage
+      return 2
+    Accept.runLemma cand.toName (trusted.map String.toName) oleans
   | ["protected", net, mod, olean] => Accept.runProtected net mod.toName olean
   | _ =>
     IO.eprintln usage

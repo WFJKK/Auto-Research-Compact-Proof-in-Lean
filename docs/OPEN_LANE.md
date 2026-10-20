@@ -62,6 +62,14 @@ in this shape is verified; to get a length as well, `D` is written in the counte
 (`docs/COUNTED.md`), as `examples/open_lane/max2_tiny_scored` does, and the manifest's `scored` block
 names the checker, its soundness theorem and its instance.
 
+## Kinds of submission
+
+A manifest is a performance claim by default (a proof of `Target`); `"kind": "auxiliary"` submits a lemma
+with any statement instead, which is compiled, replayed and axiom-checked the same way and accepted with no
+count and no score (its statement and axioms are in the receipt). The pipeline's `compile` subcommand of
+`scripts/accept.py` compiles a module of a candidate's workspace in the box for development; its output is
+never evidence.
+
 ## Tests
 
     python3 -m pytest scripts/test_accept.py -v
