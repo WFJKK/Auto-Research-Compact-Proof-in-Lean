@@ -1,11 +1,11 @@
 import CompactCheck.GeneralOpsSound
 
 /-!
-# Soundness of the checker on attention networks
+# Soundness of the checker on attention networks: single and interval leaves
 
-`checkGeneral_sound`: if `checkProofGeneral` certifies `n` inputs, the
-network answers at least `n` inputs correctly, in the sense of `Spec.lean`
-(over the reals, with the real exponential). The steps:
+`generalSingle_correct` and `generalInterval_correct`: every input of a
+single or interval leaf the checker accepts is answered correctly, in the
+sense of `Spec.lean` (over the reals, with the real exponential). The steps:
 
 1. On an input `x`, every value the checker computes is related to the real
    value (`GRel`): an interval tensor encloses it, and the box of an
@@ -15,10 +15,10 @@ network answers at least `n` inputs correctly, in the sense of `Spec.lean`
    checker computes enclose the real logits (`gevalGraph_sim`).
 2. If the lower bound of the label's logit is above the upper bound of
    every other logit, the real logits have their strict maximum at the
-   label (`marginTest_correct`). So every input of an accepted leaf is
-   answered correctly (`generalLeafOk_correct`).
-3. The accepted leaves do not overlap, so they never count an input twice
-   (`leaves_certified_le`, as for linear networks).
+   label (`marginTest_correct`).
+
+`TokensLeafSound.lean` adds the token_interval leaves and puts the leaves
+together (`checkGeneral_sound`).
 -/
 
 namespace CompactCheck
@@ -104,6 +104,56 @@ theorem tensors_sim {g : Graph} {x : Input} {vals : Array GVal} {rvals : Array (
         subst h
         obtain ⟨t, ht, hvt⟩ := tensor_sim hr ha
         obtain ⟨ts, hts, hrel⟩ := tensors_sim hr hl
+        refine ⟨t :: ts, ?_, List.Forall₂.cons hvt hrel⟩
+        simp [List.mapM_cons, ht, hts]
+
+/-- The arguments `as` of an operation related to the real values: all an
+    operation reads. -/
+def ArgsRel (g : Graph) (x : Input) (vals : Array GVal) (rvals : Array (Tensor ℝ)) (as : List ℕ) :
+    Prop :=
+  ∀ a ∈ as, ∀ u, vals[a]? = some u → ∃ t, rvals[a]? = some t ∧ GRel g x u t
+
+theorem ARel.args {g : Graph} {x : Input} {vals : Array GVal} {rvals : Array (Tensor ℝ)}
+    (h : ARel (GRel g x) vals rvals) (as : List ℕ) : ArgsRel g x vals rvals as :=
+  fun _ _ _ hu => h.get? hu
+
+theorem tensor_sim' {g : Graph} {x : Input} {vals : Array GVal} {rvals : Array (Tensor ℝ)}
+    {as : List ℕ} (hr : ArgsRel g x vals rvals as) {a : ℕ} (ham : a ∈ as) {v : DT}
+    (h : vals[a]?.bind GVal.tensor = some v) : ∃ t, rvals[a]? = some t ∧ v.Encl t := by
+  cases hu : vals[a]? with
+  | none => simp [hu] at h
+  | some u =>
+    obtain ⟨t, ht, hrel⟩ := hr a ham u hu
+    cases u with
+    | box b => simp [hu, GVal.tensor] at h
+    | dt v' =>
+      simp only [hu, Option.bind_some, GVal.tensor, Option.some.injEq] at h
+      subst h
+      exact ⟨t, ht, hrel⟩
+
+theorem tensors_sim' {g : Graph} {x : Input} {vals : Array GVal} {rvals : Array (Tensor ℝ)}
+    {bs : List ℕ} (hr : ArgsRel g x vals rvals bs) :
+    ∀ {args : List ℕ} {as : List DT}, (∀ a ∈ args, a ∈ bs) →
+      (args.mapM fun a => vals[a]?.bind GVal.tensor) = some as →
+      ∃ ts, args.mapM (rvals[·]?) = some ts ∧ List.Forall₂ DT.Encl as ts
+  | [], as, _, h => by
+    simp only [List.mapM_nil, Option.pure_def, Option.some.injEq] at h
+    subst h
+    exact ⟨[], rfl, List.Forall₂.nil⟩
+  | a :: args, as, hsub, h => by
+    simp only [List.mapM_cons] at h
+    cases ha : vals[a]?.bind GVal.tensor with
+    | none => simp [ha] at h
+    | some v =>
+      cases hl : args.mapM (fun a => vals[a]?.bind GVal.tensor) with
+      | none => simp [ha, hl] at h
+      | some vs =>
+        simp only [ha, hl, Option.bind_eq_bind, Option.bind_some, Option.pure_def,
+          Option.some.injEq] at h
+        subst h
+        obtain ⟨t, ht, hvt⟩ := tensor_sim' hr (hsub a List.mem_cons_self) ha
+        obtain ⟨ts, hts, hrel⟩ :=
+          tensors_sim' hr (fun b hb => hsub b (List.mem_cons_of_mem _ hb)) hl
         refine ⟨t :: ts, ?_, List.Forall₂.cons hvt hrel⟩
         simp [List.mapM_cons, ht, hts]
 
@@ -406,7 +456,7 @@ theorem getD_replicate {α : Type} (n j : ℕ) (a : α) : (Array.replicate n a).
     the real values. -/
 theorem gevalOp_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweights w = some dw)
     {x : Input} {input : GVal} (hin : InputRel g x input) {vals : Array GVal}
-    {rvals : Array (Tensor ℝ)} (hr : ARel (GRel g x) vals rvals) {op : Op} {v : GVal}
+    {rvals : Array (Tensor ℝ)} {op : Op} (hr : ArgsRel g x vals rvals op.args) {v : GVal}
     (h : gevalOp g dw input vals op = some v) :
     ∃ t, semOp g (realWeights w) x rvals op = some t ∧ GRel g x v t := by
   cases op with
@@ -441,7 +491,7 @@ theorem gevalOp_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweight
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dsum_sim hut huc
     exact ⟨r, by
       change evalOp g (realWeights w) x rvals (.sum a d) = some r
@@ -457,8 +507,8 @@ theorem gevalOp_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweight
         simp only [ha, hb] at h
         split_ifs at h with hs
         obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
-        obtain ⟨ta, hta, hea⟩ := tensor_sim hr ha
-        obtain ⟨tb, htb, heb⟩ := tensor_sim hr hb
+        obtain ⟨ta, hta, hea⟩ := tensor_sim' hr (by simp [Op.args]) ha
+        obtain ⟨tb, htb, heb⟩ := tensor_sim' hr (by simp [Op.args]) hb
         obtain ⟨r, hr', hcr⟩ := add_sim hea heb (by simpa using hs) hc
         exact ⟨r, by
           change evalOp g (realWeights w) x rvals (.add a b) = some r
@@ -473,25 +523,25 @@ theorem gevalOp_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweight
       | some xb =>
         simp only [ha, hb] at h
         obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
-        obtain ⟨ta, hta, hea⟩ := tensor_sim hr ha
-        obtain ⟨tb, htb, heb⟩ := tensor_sim hr hb
+        obtain ⟨ta, hta, hea⟩ := tensor_sim' hr (by simp [Op.args]) ha
+        obtain ⟨tb, htb, heb⟩ := tensor_sim' hr (by simp [Op.args]) hb
         obtain ⟨r, hr', hcr⟩ := dbinary_sim hea heb hc
         exact ⟨r, by simp only [semOp, hta, htb, hr'], hcr⟩
   | neg a =>
     simp only [gevalOp] at h
     obtain ⟨u, hu, rfl⟩ := Option.map_eq_some_iff.mp h
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     exact ⟨t.map Neg.neg, by simp only [semOp, ht, Option.map_some], dneg_encl hut⟩
   | matmul a b =>
     simp only [gevalOp] at h
     cases hb : vals[b]?.bind GVal.tensor with
     | none => simp [hb] at h
     | some y =>
-      obtain ⟨tb, htb, hyb⟩ := tensor_sim hr hb
+      obtain ⟨tb, htb, hyb⟩ := tensor_sim' hr (by simp [Op.args]) hb
       cases ha : vals[a]? with
       | none => simp [ha, hb] at h
       | some u =>
-        obtain ⟨ta, hta, hua⟩ := hr.get? ha
+        obtain ⟨ta, hta, hua⟩ := hr a (by simp [Op.args]) _ ha
         cases u with
         | box bx =>
           simp only [ha, hb] at h
@@ -507,61 +557,61 @@ theorem gevalOp_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweight
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dmove_sim (indexOp_mover items) hut huc
     exact ⟨r, by simp only [semOp, ht, Option.bind_some, hr'], hcr⟩
   | transpose a =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dmove_sim transposeOp_mover hut huc
     exact ⟨r, by simp only [semOp, ht, Option.bind_some, hr'], hcr⟩
   | unsqueeze a d =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dmove_sim (unsqueezeOp_mover d) hut huc
     exact ⟨r, by simp only [semOp, ht, Option.bind_some, hr'], hcr⟩
   | expand a shape =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dmove_sim (expandOp_mover shape) hut huc
     exact ⟨r, by simp only [semOp, ht, Option.bind_some, hr'], hcr⟩
   | cat args d =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨as, has, hac⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨ts, hts, hrel⟩ := tensors_sim hr has
+    obtain ⟨ts, hts, hrel⟩ := tensors_sim' (args := args) hr (fun a ha => ha) has
     obtain ⟨r, hr', hcr⟩ := djoin_sim (catOp_mover d) hrel hac
     exact ⟨r, by simp only [semOp, hts, Option.bind_some, hr'], hcr⟩
   | stack args d =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨as, has, hac⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨ts, hts, hrel⟩ := tensors_sim hr has
+    obtain ⟨ts, hts, hrel⟩ := tensors_sim' (args := args) hr (fun a ha => ha) has
     obtain ⟨r, hr', hcr⟩ := djoin_sim (stackOp_mover d) hrel hac
     exact ⟨r, by simp only [semOp, hts, Option.bind_some, hr'], hcr⟩
   | exp a =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     exact ⟨t.map Real.exp, by simp only [semOp, ht, Option.map_some]; rfl, dexp_sim hut huc⟩
   | softmax a d =>
     simp only [gevalOp] at h
     obtain ⟨c, hc, rfl⟩ := Option.map_eq_some_iff.mp h
     obtain ⟨u, hu, huc⟩ := Option.bind_eq_some_iff.mp hc
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     obtain ⟨r, hr', hcr⟩ := dsoftmax_sim hut huc
     exact ⟨r, by simp only [semOp, ht, Option.bind_some, hr'], hcr⟩
   | zerosLike a =>
     simp only [gevalOp] at h
     obtain ⟨u, hu, rfl⟩ := Option.map_eq_some_iff.mp h
-    obtain ⟨t, ht, hut⟩ := tensor_sim hr hu
+    obtain ⟨t, ht, hut⟩ := tensor_sim' hr (by simp [Op.args]) hu
     refine ⟨⟨t.shape, Array.replicate (shapeSize t.shape) 0⟩,
       by simp only [semOp, ht, Option.map_some], ?_⟩
     change (DT.ofInts u.shape (Array.replicate (shapeSize u.shape) 0) 0).Encl _
@@ -585,7 +635,7 @@ theorem gevalOps_sim {g : Graph} {w : Weights ℚ} {dw : DWeights} (hdw : dweigh
     | none => simp [hv] at h
     | some v =>
       simp only [hv] at h
-      obtain ⟨t, ht, hvt⟩ := gevalOp_sim hdw hin hr hv
+      obtain ⟨t, ht, hvt⟩ := gevalOp_sim hdw hin (hr.args _) hv
       obtain ⟨rvals', h', hr'⟩ := gevalOps_sim hdw hin (hr.push hvt) h
       exact ⟨rvals', by simp only [semOps, ht]; exact h', hr'⟩
 
@@ -665,114 +715,5 @@ theorem generalInterval_correct {g : Graph} {w : Weights ℚ} {dw : DWeights}
       unfold Correct
       rw [hlab]
       exact ⟨t, ht, hs, hlt, hmax⟩
-
-/-- Every input of a leaf the checker accepts is answered correctly. -/
-theorem generalLeafOk_correct {g : Graph} {w : Weights ℚ} {dw : DWeights}
-    (hdw : dweights w = some dw) {task : Task} {leaf : Leaf}
-    (h : generalLeafOk g dw task leaf = .ok true) (x : Input) (hx : inBox leaf.box x = true) :
-    Correct g w task x := by
-  unfold generalLeafOk at h
-  cases hr : leaf.rule with
-  | skip => simp [hr] at h
-  | single =>
-    simp only [hr] at h
-    cases hb : boxInput leaf.box with
-    | none => simp [hb] at h
-    | some x0 =>
-      simp only [hb] at h
-      cases hs : generalSingle g dw task x0 with
-      | none => simp [hs] at h
-      | some ok =>
-        simp only [hs, Except.ok.injEq] at h
-        subst h
-        obtain ⟨_, huniq⟩ := boxInput_spec _ _ hb
-        rw [huniq x hx]
-        exact generalSingle_correct hdw hs
-  | interval a =>
-    cases a with
-    | none =>
-      simp only [hr] at h
-      cases hi : generalInterval g dw task leaf.box with
-      | none => simp [hi] at h
-      | some ok =>
-        simp only [hi, Except.ok.injEq] at h
-        subst h
-        exact generalInterval_correct hdw hi x hx
-    | some name => simp [hr] at h
-
-/-! ## Counting -/
-
-/-- A leaf the checker accepts. -/
-def generalCertified (g : Graph) (dw : DWeights) (task : Task) (leaf : Leaf) : Bool :=
-  match generalLeafOk g dw task leaf with
-  | .ok true => true
-  | _ => false
-
-theorem generalCertified_ok {g : Graph} {dw : DWeights} {task : Task} {leaf : Leaf}
-    (h : generalCertified g dw task leaf = true) : generalLeafOk g dw task leaf = .ok true := by
-  unfold generalCertified at h
-  split at h
-  · assumption
-  · cases h
-
-theorem generalCheckLeaves_eq (g : Graph) (dw : DWeights) (task : Task) (leaves : List Leaf)
-    (n : ℕ) (h : generalCheckLeaves g dw task leaves = .ok n) :
-    n = (leaves.map fun l => if generalCertified g dw task l then boxSize l.box else 0).sum := by
-  induction leaves generalizing n with
-  | nil =>
-    simp only [generalCheckLeaves] at h
-    cases h
-    simp
-  | cons leaf rest ih =>
-    simp only [generalCheckLeaves] at h
-    cases hr : generalCheckLeaves g dw task rest with
-    | error e => simp [hr] at h
-    | ok m =>
-      simp only [hr] at h
-      cases hl : generalLeafOk g dw task leaf with
-      | error e => simp [hl] at h
-      | ok ok =>
-        simp only [hl, Except.ok.injEq] at h
-        subst h
-        rw [List.map_cons, List.sum_cons, ← ih m hr]
-        cases ok
-        · simp [generalCertified, hl]
-        · simp only [generalCertified, hl, ↓reduceIte]
-          omega
-
-/-- **Soundness on attention networks**: if the checker certifies `n`
-    inputs, the network answers at least `n` inputs correctly. For every
-    network, weights and proof file. -/
-theorem checkGeneral_sound (g : Graph) (w : Weights ℚ) (task : Task) (proof : ProofFile) (n : ℕ)
-    (h : checkProofGeneral g w task proof = .ok n) : n ≤ numCorrect g w task := by
-  unfold checkProofGeneral at h
-  split at h
-  · cases h
-  split at h
-  · cases h
-  split at h
-  · cases h
-  split at h
-  · cases h
-  rename_i hzero
-  have hpos : ∀ v ∈ task.space, 0 < v := by
-    intro v hv
-    have : ¬ (task.space.any (· == 0) = true) := by simpa using hzero
-    simp only [List.any_eq_true, beq_iff_eq, not_exists, not_and] at this
-    exact Nat.pos_of_ne_zero (this v hv)
-  cases hdw : dweights w with
-  | none => simp [hdw] at h
-  | some dw =>
-    simp only [hdw] at h
-    split at h
-    · cases h
-    cases hw : walk proof.tree (rootBox task.space) with
-    | error e => simp [hw] at h
-    | ok leaves =>
-      simp only [hw] at h
-      rw [generalCheckLeaves_eq g dw task leaves n h]
-      exact leaves_certified_le task (generalCertified g dw task) (Correct g w task)
-        (fun l x hl hx => generalLeafOk_correct hdw (generalCertified_ok hl) x hx)
-        proof.tree leaves hw hpos
 
 end CompactCheck

@@ -36,4 +36,11 @@ import CompactCheck.Soundness
 import CompactCheck.ExpSound
 import CompactCheck.GeneralOpsSound
 import CompactCheck.GeneralSound
+import CompactCheck.Tokens
+import CompactCheck.TokensIndex
+import CompactCheck.TokensSepSound
+import CompactCheck.TokensMixSound
+import CompactCheck.TokensLeaveSound
+import CompactCheck.TokensSound
+import CompactCheck.TokensLeafSound
 import CompactCheck.FileSound

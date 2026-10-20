@@ -350,6 +350,11 @@ theorem certifiedLeaf_single (g : Graph) (w : Weights ℚ) (task : Task) (approx
               cases h
               exact happrox a (List.mem_of_find?_eq_some hf)
             exact intervalLeaf_sound g w task l.box (some a) ha hok x hx
+      | tokenInterval =>
+        simp only [hr] at hok
+        cases hl : task.constantLabel l.box with
+        | none => simp [hl] at hok
+        | some _ => simp [hl] at hok
 
 /-! ### The number of inputs in a box -/
 

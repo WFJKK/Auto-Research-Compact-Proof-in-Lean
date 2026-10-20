@@ -12,7 +12,10 @@ checks with core/check/general.py), on every development network:
    sub-box of the space if it holds more than --window inputs); Lean and
    Python must give the same status and count, and the same outcome leaf by
    leaf.
-3. Rules Python refuses on these networks (symmetry, contract, approximate,
+3. token_interval leaves: the same trees by label with token_interval
+   leaves, and random trees with some interval leaves made token_interval
+   leaves; the same tests.
+4. Rules Python refuses on these networks (symmetry, contract, approximate,
    an approximation name on a leaf, the input used other than by a lookup):
    both checkers must reject.
 
@@ -101,17 +104,18 @@ def in_window(space: list[int], win: list[tuple[int, int]], inner: dict) -> dict
 
 
 def by_label_tree(space: list[int], label_of, rng: random.Random, max_box: int,
-                  start: list[tuple[int, int]] | None = None) -> dict:
-    """Interval leaves on boxes with a constant label where the split finds
-    one quickly, single leaves on the inputs left over (random splits); on
-    the box `start` if given, which the caller then places in the space."""
+                  start: list[tuple[int, int]] | None = None, rule: str = "interval") -> dict:
+    """Leaves of the rule `rule` on boxes with a constant label where the
+    split finds one quickly, single leaves on the inputs left over (random
+    splits); on the box `start` if given, which the caller then places in
+    the space."""
 
     def build(ranges: list[tuple[int, int]], depth: int) -> dict:
         size = int(np.prod([hi - lo + 1 for lo, hi in ranges]))
         if all(lo == hi for lo, hi in ranges):
             return {"leaf": "single"}
         if size <= max_box and label_of(ranges) is not None:
-            return {"leaf": "interval"}
+            return {"leaf": rule}
         k = max(range(len(ranges)), key=lambda q: ranges[q][1] - ranges[q][0] + rng.random())
         lo, hi = ranges[k]
         cut = rng.randint(lo + 1, hi)
@@ -121,6 +125,15 @@ def by_label_tree(space: list[int], label_of, rng: random.Random, max_box: int,
         return _split(k, [cut], [build(r1, depth + 1), build(r2, depth + 1)])
 
     return build(start or [(0, v - 1) for v in space], 0)
+
+
+def with_token_leaves(tree: dict, rng: random.Random) -> dict:
+    """The tree with about half of its interval leaves made token_interval leaves."""
+    if "leaf" in tree:
+        if tree["leaf"] == "interval" and rng.random() < 0.5:
+            return {**tree, "leaf": "token_interval"}
+        return tree
+    return {**tree, "children": [with_token_leaves(c, rng) for c in tree["children"]]}
 
 
 def leaf_outcomes_match(py: dict, ln: list) -> list[str]:
@@ -225,7 +238,21 @@ def main() -> None:
                 both(f"random tree {i}", {"tree": tree})
                 n_trees += 1
 
-            # 3. what Python refuses on these networks
+            # 3. token_interval leaves
+            n_token, token_certified = 0, []
+            for max_box in (4, 64, 1024):
+                win = window(space, rng, args.window)
+                tree = in_window(space, win, by_label_tree(space, label_of, rng, max_box, win,
+                                                           rule="token_interval"))
+                py = both(f"token_interval by label, boxes up to {max_box}", {"tree": tree})
+                token_certified.append(py["certified"])
+                n_token += 1
+            for i in range(args.random):
+                tree = with_token_leaves(random_tree(space, rng, max_depth=rng.choice([2, 3, 4])), rng)
+                both(f"random tree with token_interval leaves {i}", {"tree": tree})
+                n_token += 1
+
+            # 4. what Python refuses on these networks
             skip = {"leaf": "skip"}
             both("symmetry", {"symmetry": True, "tree": skip}, "rejected", per_leaf=False)
             both("contract", {"contract": [{"name": "M", "chain": ["a", "b"]}], "tree": skip}, "rejected",
@@ -233,9 +260,12 @@ def main() -> None:
             both("approximate", {"approximate": [{"name": "P", "of": "a", "form": "dense", "values": [[0]]}],
                                  "tree": skip}, "rejected", per_leaf=False)
             both("approximation on a leaf", {"tree": {"leaf": "interval", "approx": "P"}}, "rejected", per_leaf=False)
+            both("approximation on a token_interval leaf", {"tree": {"leaf": "token_interval", "approx": "P"}},
+                 "rejected", per_leaf=False)
 
             status = "ok" if not problems else "DIFFERS: " + "; ".join(problems)
             print(f"{nid}: singles {n_single}/{len(inputs)}, {n_trees} interval trees (by label: {certified}), "
+                  f"{n_token} token_interval trees (by label: {token_certified}), "
                   f"Lean {times['Lean']:.0f} s, Python {times['Python']:.0f} s, {status}", flush=True)
             failures += bool(problems)
             if args.log:
@@ -243,6 +273,7 @@ def main() -> None:
                     f.write(json.dumps({"network": nid, "status": "ok" if not problems else "differs",
                                         "problems": problems, "singles": [n_single, len(inputs)],
                                         "trees": n_trees, "by_label": certified,
+                                        "token_trees": n_token, "token_by_label": token_certified,
                                         "lean_s": round(times["Lean"], 1),
                                         "python_s": round(times["Python"], 1)}) + "\n")
     sys.exit(1 if failures else 0)

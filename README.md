@@ -21,12 +21,13 @@ The checker checks each network the way the Python checker does:
   `interval` leaves, and the `contract`, `symmetry` and `approximate`
   rules. The theorem for these is `check_sound` in `Soundness.lean`.
 - Attention networks and the xorformer (`core/check/general.py`) with
-  `checkProofGeneral`: `single`, `skip` and `interval` leaves. The theorem
-  for these is `checkGeneral_sound` in `GeneralSound.lean`.
+  `checkProofGeneral`: `single`, `skip`, `interval` and `token_interval`
+  leaves. The theorem for these is `checkGeneral_sound` in
+  `TokensLeafSound.lean`.
 
-A proof with `token_interval` leaves, or with a rule adopted through the
-rule route (such as `token_convex`), is rejected for now, so every count
-the checker gives is backed by the theorem.
+A proof with a rule adopted through the rule route (such as
+`token_convex`) is rejected for now, so every count the checker gives is
+backed by the theorem.
 
 An `interval` leaf certifies every input of its box at once.
 `intervalLeaf_sound` in `IntervalSound.lean` proves that every input of an
@@ -75,9 +76,49 @@ upper bound of every other logit.
 `ExpSound.lean` proves the bounds on `exp` and `softmax`.
 `GeneralOpsSound.lean` proves that each operation keeps every true value
 inside its interval, and `GeneralSound.lean` puts the operations together
-into `checkGeneral_sound`. The contract, symmetry and approximate rules
-need a linear network; on these networks the Python checker refuses them,
-and so does this one.
+for single and interval leaves. The contract, symmetry and approximate
+rules need a linear network; on these networks the Python checker refuses
+them, and so does this one.
+
+## token_interval leaves
+
+`Tokens.lean` checks a `token_interval` leaf as `core/check/tokens.py`
+does. An interval leaf turns each position's tokens into one box at the
+first lookup. A token_interval leaf keeps the tokens apart for as long as
+the graph allows: the rows of a weight matrix for each allowed token at
+each position, weighted sums of such rows, and, when at most one position
+varies, one value per input of the box. An operation outside these rules
+turns its arguments into interval tensors, as Python does. The leaf
+certifies its box if the lowest margin bound over its inputs is positive.
+
+Lean computes the same margin bounds as Python, as exact fractions:
+`scripts/compare_tokens.py` compares them box by box (175,102 random boxes
+on the 60 development networks, all equal).
+
+In a few edge cases Lean does not follow Python's rules:
+
+- A product of rows with a constant whose intervals agree along a
+  dimension, but whose real values may differ there. Python treats it as
+  one weight per position, which can give a wrong bound. Lean declines
+  that rule, as Python declines any other inexact constant.
+- Rules that rely on a shape Python does not check. Lean checks the shape
+  and declines otherwise.
+
+None of these cases occurs on the networks of the zoo, so both checkers
+certify the same inputs there.
+
+The proof fixes an input of the box and relates every value of the leaf to
+the real value on that input (`TokensSepSound.lean`,
+`TokensMixSound.lean`, `TokensLeaveSound.lean`). Every operation keeps the
+relation (`TokensSound.lean`), and the margin bound is below the real
+margin (`lowestMargin_sound` in `TokensLeafSound.lean`).
+
+## The open lane
+
+Proofs that are not proof files: Lean modules that prove a protected
+target, checked by the kernel, and a counted language that gives such a
+proof a length. `docs/OPEN_LANE.md` describes the acceptance service and
+`docs/COUNTED.md` the counted language.
 
 ## Files
 
@@ -104,9 +145,20 @@ and so does this one.
 | `Soundness.lean` | `check_sound` and the lemmas it rests on |
 | `ExpSound.lean` | the bounds of `Exp.lean` hold |
 | `GeneralOpsSound.lean` | each operation of `General.lean` keeps the true values inside its intervals |
-| `GeneralSound.lean` | `checkGeneral_sound` and the lemmas it rests on |
+| `GeneralSound.lean` | single and interval leaves of attention networks are sound |
+| `Tokens.lean` | the token_interval leaves, as `core/check/tokens.py` computes them |
+| `TokensIndex.lean` | facts about shapes and indices for the token rules |
+| `TokensSepSound.lean` | the relation between a leaf's values and the real values; rows per position |
+| `TokensMixSound.lean` | weighted sums of rows |
+| `TokensLeaveSound.lean` | values that leave the domain: one per input, or interval tensors |
+| `TokensSound.lean` | every operation of a token_interval leaf keeps the relation |
+| `TokensLeafSound.lean` | the margin bound, the leaf, and `checkGeneral_sound` |
 | `FileSound.lean` | `checkProofFile_sound`: both checkers, as the program runs them |
-| `Counted*.lean` | the open lane's counted language (docs/COUNTED.md); `CountedGeneral.lean` and `CountedGeneralSound.lean`: the single and interval rules on attention networks as counted operations (`gsingle`; `ginterval`, maximum-knowledge condition only) |
+| `Counted.lean` | the counted language of the open lane: a monad whose every operation on a number is charged |
+| `CountedCheck.lean` | the checker with its bill: `cost-v3` for proof files (`compactcheck cost`) |
+| `CountedOps.lean` | the checker's rules as charged operations, each with its specification |
+| `CountedGeneral.lean`, `CountedGeneralSound.lean` | the single and interval rules on attention networks as counted operations (`gsingle`; `ginterval`, maximum-knowledge condition only) |
+| `../AcceptMain.lean` | the `acceptcheck` program: the open lane's trusted check |
 | `Json.lean`, `../Main.lean` | reading files, and the `compactcheck` program |
 | `*Test.lean` | tests; the build fails if one fails |
 | `Tutorial.lean` | Lean basics, with exercises |
@@ -127,8 +179,8 @@ and so does this one.
   The theorems themselves are checked by Lean's kernel.
 
 `Check.lean`, `Interval.lean`, `Contract.lean`, `Approx.lean`,
-`Symmetry.lean`, `General.lean`, `Exp.lean`, `Walk.lean` and `LinAlg.lean`
-need no trust: the theorem is about them. Nor does the network file's flag
+`Symmetry.lean`, `General.lean`, `Tokens.lean`, `Exp.lean`, `Walk.lean` and
+`LinAlg.lean` need no trust: the theorem is about them. Nor does the network file's flag
 that says which checker to use: both are sound. Nor does reading the numbers of an approximation: whatever
 matrix the reader produces, its error is computed from it.
 
@@ -136,6 +188,7 @@ matrix the reader produces, its error is computed from it.
 
     lake build                  # library, proofs and tests
     lake build compactcheck     # the program
+    lake build acceptcheck      # the open lane's service (docs/OPEN_LANE.md)
 
 ## Use
 
@@ -146,6 +199,9 @@ The scripts need the pipeline's Python environment (numpy, torch).
 
     # check a proof file; the last line is {"certified": n}
     .lake/build/bin/compactcheck max2-v64-s0.json proof.json
+
+    # check a proof and bill it under cost-v3 (linear networks for now)
+    .lake/build/bin/compactcheck cost max2-v64-s0.json proof.json
 
     # check every input on its own
     .lake/build/bin/compactcheck brute max2-v64-s0.json
@@ -160,6 +216,9 @@ The scripts need the pipeline's Python environment (numpy, torch).
     # the open lane's single and interval rules on an attention network: verdict and cost-v3 charge
     .lake/build/bin/compactcheck gsingle attn-max2-v64-s0.json inputs.json
     .lake/build/bin/compactcheck ginterval attn-max2-v64-s0.json boxes.json
+
+    # token_interval margin bounds against Python's, box by box
+    python3 scripts/compare_tokens.py <repo> models/attn-max2 --log tokens-attn-max2.jsonl
 
     # Lean's semantics in float64 against PyTorch, on every development network
     python3 scripts/compare_floats.py <repo> models/attn-max2

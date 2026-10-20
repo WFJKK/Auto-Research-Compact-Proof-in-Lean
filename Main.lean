@@ -2,6 +2,7 @@ import CompactCheck.Json
 import CompactCheck.Semantics
 import CompactCheck.CountedCheck
 import CompactCheck.CountedGeneral
+import CompactCheck.Tokens
 
 /-!
 # The `compactcheck` program
@@ -41,6 +42,13 @@ import CompactCheck.CountedGeneral
         The interval rule for general networks (`CostM.ginterval`) on each box
         of a JSON list (a box: one [lo, hi] per position): the verdict and the
         cost-v3 charge, one JSON object per line.
+
+    compactcheck tokens <network.json> <leaves.json>
+        For each box and label in a JSON list of {"ranges": [[lo, hi], ...],
+        "label": l}: the lowest margin bound of a token_interval leaf, as
+        [m, e] for m * 2^e (null if the network has one output), or
+        "error" where the proof would be rejected. For comparing with the
+        Python checker bound for bound.
 
     compactcheck floats <network.json> <inputs.json>
         The logits for each input computed in floats with the spec's
@@ -136,6 +144,7 @@ def ruleName : Rule → String
   | .single => "single"
   | .skip => "skip"
   | .interval _ => "interval"
+  | .tokenInterval => "token_interval"
 
 def runLeaves (netPath proofPath : String) : IO UInt32 := do
   let net ← loadNetwork netPath
@@ -209,6 +218,29 @@ def runCost (netPath proofPath : String) : IO UInt32 := do
         ("by_category", Json.mkObj (c.map fun (k, v) => (k, Lean.toJson v)))]).compress
       return 0
 
+def runTokens (netPath leavesPath : String) : IO UInt32 := do
+  let net ← loadNetwork netPath
+  let dw ← match dweights net.weights with
+    | some dw => pure dw
+    | none => throw (IO.userError "a weight is not a tensor of dyadic numbers")
+  let leaves ← match (← readJson leavesPath).getArr? with
+    | .ok a => pure a
+    | .error e => throw (IO.userError e)
+  let rows ← leaves.toList.mapM fun j => do
+    let ranges ← match j.getObjValAs? (List (List Nat)) "ranges" with
+      | .ok r => pure r
+      | .error e => throw (IO.userError e)
+    let label ← match j.getObjValAs? Nat "label" with
+      | .ok l => pure l
+      | .error e => throw (IO.userError e)
+    let box : Box := ranges.map fun r => ⟨r.getD 0 0, r.getD 1 0⟩
+    pure (match tokenLeafBound net.graph dw box label with
+      | none => Json.str "error"
+      | some none => Json.null
+      | some (some (m, e)) => Json.arr #[Json.str (toString m), Lean.toJson e])
+  IO.println (Json.arr rows.toArray).compress
+  return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | ["cost", net, proof] => runCost net proof
@@ -218,10 +250,12 @@ def main (args : List String) : IO UInt32 := do
   | ["gsingle", net, inputs] => runGSingle net inputs
   | ["ginterval", net, boxes] => runGInterval net boxes
   | ["leaves", net, proof] => runLeaves net proof
+  | ["tokens", net, leaves] => runTokens net leaves
   | [net, proof] => runCheck net proof
   | _ =>
     IO.eprintln ("usage: compactcheck <network.json> <proof.json> | brute <network.json> | " ++
       "logits <network.json> <inputs.json> | leaves <network.json> <proof.json> | " ++
-      "cost <network.json> <proof.json> | floats <network.json> <inputs.json> | " ++
+      "cost <network.json> <proof.json> | tokens <network.json> <leaves.json> | " ++
+      "floats <network.json> <inputs.json> | " ++
       "gsingle <network.json> <inputs.json> | ginterval <network.json> <boxes.json>")
     return 2

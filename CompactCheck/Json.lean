@@ -1,5 +1,5 @@
 import Lean.Data.Json
-import CompactCheck.General
+import CompactCheck.Tokens
 
 /-!
 # Reading networks and proof files
@@ -143,7 +143,9 @@ partial def parseTree (j : Json) : Except String SplitTree := do
     | "single", none => pure (.leaf .single)
     | "skip", none => pure (.leaf .skip)
     | "interval", a => pure (.leaf (.interval a))
-    | "single", some _ | "skip", some _ => throw "only interval leaves take an approximation name"
+    | "token_interval", none => pure (.leaf .tokenInterval)
+    | "single", some _ | "skip", some _ | "token_interval", some _ =>
+      throw "only interval leaves take an approximation name"
     | other, _ => throw s!"leaf rule {other} is not allowed"
   | .error _ =>
     unless ← exactKeys j ["split", "children"] do throw "a node is a leaf or a split with children"

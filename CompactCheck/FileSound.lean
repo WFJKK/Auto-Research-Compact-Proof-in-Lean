@@ -1,5 +1,5 @@
 import CompactCheck.Json
-import CompactCheck.GeneralSound
+import CompactCheck.TokensLeafSound
 
 /-!
 # Soundness of the checker on proof files
@@ -9,7 +9,7 @@ file and a proof file, the network answers at least `n` inputs correctly.
 `checkProofFile` checks a network the Python checker treats as linear with
 `checkProof`, and any other network with `checkProofGeneral`; both are
 sound (`check_sound` in `Soundness.lean`, `checkGeneral_sound` in
-`GeneralSound.lean`).
+`TokensLeafSound.lean`).
 -/
 
 namespace CompactCheck

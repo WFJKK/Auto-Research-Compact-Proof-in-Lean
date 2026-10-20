@@ -65,6 +65,13 @@ def leafOk (g : Graph) (w : Weights Rat) (task : Task) (approxs : List Approx) (
     match approxs.find? (·.name == name) with
     | some a => intervalLeaf g w task leaf.box (some a)
     | none => .error s!"unknown approximation {name}"
+  | .tokenInterval =>
+    -- as Python: a leaf whose label is not constant is not certified; any
+    -- other is refused, since interval leaves already keep each token's row
+    match task.constantLabel leaf.box with
+    | none => .ok false
+    | some _ => .error ("the token_interval rule is for networks beyond linear maps; here interval " ++
+        "leaves already use each token's exact row once the maps are contracted")
 
 /-- The number of inputs in the certified leaves. -/
 def checkLeaves (g : Graph) (w : Weights Rat) (task : Task) (approxs : List Approx) :

@@ -33,6 +33,9 @@ inductive Rule where
   | single
   | skip
   | interval (approx : Option String)
+  /-- `token_interval`: an interval leaf that keeps the tokens apart
+      (`Tokens.lean`), for networks beyond linear maps. -/
+  | tokenInterval
 deriving Repr, DecidableEq
 
 /-- A split tree, as in the proof file. -/

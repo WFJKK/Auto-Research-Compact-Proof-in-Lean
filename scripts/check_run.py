@@ -16,8 +16,8 @@ interrupted check resumes where it stopped. Exits with status 1 if Lean and
 Python disagree on any record.
 
 Proofs the Python checker accepted with a leaf rule the Lean checker does
-not have yet (token_interval, rules adopted through the rule route) are
-skipped and counted, not logged, so a later check picks them up.
+not have yet (rules adopted through the rule route, such as token_convex)
+are skipped and counted, not logged, so a later check picks them up.
 
 A proof file identical to one already checked on the same network (the
 brute-force baseline at every knob value, say) is not run again: Lean's
@@ -43,7 +43,7 @@ import export_network  # noqa: E402
 LEAN = HERE.parent / ".lake" / "build" / "bin" / "compactcheck"
 
 
-LEAN_LEAF_RULES = {"single", "skip", "interval"}
+LEAN_LEAF_RULES = {"single", "skip", "interval", "token_interval"}
 
 
 def leaf_rules(tree) -> set:

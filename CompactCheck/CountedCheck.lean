@@ -323,6 +323,12 @@ def proofCost (g : Graph) (w : Weights Rat) (task : Task) (proof : ProofFile) (n
           | .ok b => b
           | .error _ => false
         pure (c.add "interval" ic, if ok then accepted + 1 else accepted)
+    | .tokenInterval =>
+      -- as Python: no charge when the label is not constant; otherwise `checkProof` has already
+      -- rejected the proof, since the rule is for networks beyond linear maps
+      match task.constantLabel leaf.box with
+      | none => pure (c, accepted)
+      | some _ => throw "token_interval: the rule is for networks beyond linear maps"
   let c := if proof.symmetry then c.add "symmetry" accepted else c
   pure c
 
