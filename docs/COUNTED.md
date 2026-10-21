@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 2, 20 October evening)
+# The counted language (step 2 of the open lane; version 3, 21 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -19,13 +19,16 @@ A checker is a function of an interpreter:
 
 `Interp` (CountedOps.lean) is a structure of abstract types and operations: a monad `M`, numbers `V`,
 truth values `B`, counts `N`; `weight`, `cert`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
-`max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `ifN`, `ifV`, `ifB`, `ifU`, `bnot`, `band`, `bor`;
-`nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations, `single` and `interval`.
-The checker's own code is ordinary Lean on lists, `Nat` indices and strings around these calls, and it
-has to typecheck for every `I`: so it can never look inside a value of `I.V`, `I.B` or `I.N`. A truth
-value can only choose between two computations of the same abstract kind (`ifN`, `ifV`, `ifB`, `ifU`); a
-count can only grow (`nsucc`, `nadd`, `nofNat`). Nothing learned about the network ever reaches the
-checker's free code.
+`max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nmask`, `selectV`,
+`bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
+`single` and `interval`. The checker's own code is ordinary Lean on lists, `Nat` indices and strings
+around these calls, and it has to typecheck for every `I`: so it can never look inside a value of `I.V`,
+`I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`), a mask
+on a count (`nmask`), a choice between two numbers (`selectV`, charged) or another truth value through a
+charged gate; a count can only grow. So nothing learned about the network ever decides what the
+checker's own code does next, and the bill the interpreter keeps is the whole cost of the computation.
+The shapes of the weights (`weightShape`) and the certificate's size are concrete and may be branched
+on: they are public structure, not the network's numbers.
 
 `Interp.counting` is the interpreter the service runs: `M` is `CostM` (Counted.lean, a structure around
 `Env → Cost → Option (α × Cost)` with the weights and the certificate in `Env` and the bill in `Cost`),
@@ -49,15 +52,17 @@ counting interpreter is a `CostM` function with a specification lemma (`CostM.si
 `CostM.interval_spec`, `run_bind`, `run_pure`, `exec_of_billed`), and `Interp.counting` is reducible, so a
 soundness proof unfolds `D Interp.counting` to those functions and never looks inside the monad.
 
-### Why an interface, and not concrete booleans
+### Why this shape, after two reviews
 
-The first version of the language (20 October, morning) was a concrete monad: `D : CostM Nat`, with
-`Bool` results from the charged comparisons and free `Nat` arithmetic around them. A reviewer found the
-hole: a comparison yields a bit, free arithmetic and recursion can turn bits back into numbers, so a
-checker could binary-search every weight at about 50 charged operations per weight and then run the
-whole network in free `Nat` arithmetic, for about 50 E on any network. No allowlist closes that: any
-recursion gives free arithmetic. With the interface, a bit cannot leave the monad, so there is nothing to
-launder.
+The first version (20 October, morning) was a concrete monad, `D : CostM Nat`, with `Bool` results from
+the charged comparisons and free `Nat` arithmetic: a reviewer showed that bits from comparisons can be
+turned back into numbers by free arithmetic, so a checker could binary-search every weight at about 50
+charged operations each and then run the network for nothing. The second version (that evening) made
+numbers, truth values and counts abstract but kept `ifN : B → M N → M N → M N` and free gates: the
+reviewer showed that `I.ifN bit (k 1) (k 0)` hands the bit to the checker's own code `k` through which
+branch runs, whatever the branch returns, and that gates alone give bit-level arithmetic. Hence version
+3: no branching into the checker's code at all, gates charged. This is the shape of the split-tree
+checker too, whose structure comes from the certificate and whose results only become counts.
 
 ## The check (`acceptcheck closure`)
 
@@ -96,10 +101,10 @@ Proving that a checker's count is right says nothing about its bill, so the bill
 candidate: the instance theorem `CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (n, L)` is
 accepted by the kernel at a statement the service builds, so `L` is what the counting interpreter charges
 on the protected weights, as the kernel computes it. What makes that charge the whole cost is the
-interface: every number reaches `D` as an abstract `I.V` through an operation of the interpreter, every
-truth value is an abstract `I.B` that can only choose between computations of the interpreter, and `D`'s
-own code, which must work for every interpreter, can neither read nor make one. So no work on a value of
-the network can happen outside the bill. The general-layer budgets bound the free structure around it. A receipt's `execution_assurance` is `kernel_checked_instance` for this reason: the count and the
+interface: every number reaches `D` as an abstract `I.V`, every truth value is an abstract `I.B`, and
+neither can decide what `D`'s own code does next or be turned into anything but counts, numbers and
+truth values through charged operations. So no work on a value of the network can happen outside the
+bill. The description-size budget bounds the free structure around it; it is a bound, not a proof. A receipt's `execution_assurance` is `kernel_checked_instance` for this reason: the count and the
 bill are both kernel-checked for the exact checker, certificate and weights; nothing of a candidate is ever
 executed by the service.
 
@@ -128,12 +133,17 @@ check, the service enforces, as policy (recorded in the receipt's policy digest)
 
 - no reference to a protected constant other than `graph` and `task` from the general layer
   (`acceptcheck score` rejects it; the closure check catches it in `D` first);
-- a literal budget: the literal weight of the checker's computational closure (the checker and the
+- a description-size budget: the size of the checker's computational closure (the checker and the
   definitions it uses, transitively through definitions and never through theorems: what it computes is
-  a function of these bodies and of the interpreter), 1 per 16 bits of a natural number literal and 1 per
-  8 bytes of a string literal over the bodies, with no exemption by name (a reviewer found that exempting
-  compiler-looking names let `def _table` hide data), is at most `32 + E / 8`. A copy of the weights
-  costs at least about `2 E`, so it cannot fit, while a general checker needs a handful;
+  a function of these bodies and of the interpreter), every node of every body counted 1, a numeral 1 per
+  2 bits, a string 1 per byte, with no exemption by name, is at most `8192 + 4 E`. A reviewer showed that
+  data can live in constructors (`[true, false, ...]`) and in the shape of applications alone
+  (`fun c0 c1 z => c0 (c1 (c0 z))`), so the whole term is measured, and the rates make a number of the
+  network cost about 15 however it is written: a copy of the weights costs at least about `12 E`, the
+  pilot's column checker about 7,400. This bounds description length; it does not show the absence of
+  compressed information, and on a network of a few hundred weights the whole set of weights is smaller
+  than any checker, so the budget separates nothing there (the tests use a smaller base through an
+  environment hook, recorded in the policy digest);
 - a kernel budget: replaying the general layer (timed on its own, before the rest) takes at most 120 s.
 
 These bound what the general layer can hide; they do not prove that nothing is hidden. The adversarial

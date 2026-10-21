@@ -39,7 +39,7 @@ and, once verified as above, goes through the scored path: the certificate becom
 `cert`; `acceptcheck closure` checks that the checker touches numbers only through the counted primitives
 (accept/allowlist.txt); `acceptcheck score` has the kernel accept the soundness theorem at the fixed shape and
 the instance `CostM.billed D ⟨weights, cert⟩ = some (claimed_count, claimed_bill)`, and measures the general
-layer (literal weight, kernel time), which the policy budgets below bound. The receipt's `scoring` block says
+layer (the checker's description size, kernel time), which the policy budgets below bound. The receipt's `scoring` block says
 whether the submission is scored and gives the length in cost-v3 units: the bill, plus `extract` (one per
 weight entry) and `read` (one per certificate number). A submission refused scoring stays verified.
 
@@ -88,14 +88,19 @@ COMPILE_TIMEOUT_S = 3600
 CHECK_TIMEOUT_S = 3600
 MEMORY_MB = 12288  # virtual: Mathlib's .olean files are mapped into memory
 ALLOWLIST = LEAN_PROJECT / "accept" / "allowlist.txt"
-# the scoring policy (docs/COUNTED.md): the general layer's free data and kernel work are bounded
-LITERAL_BUDGET_BASE = 32      # literal weight allowed to the general layer (acceptcheck's litWeight) ...
-LITERAL_BUDGET_PER_PARAM = 8  # ... plus one per this many weight entries: a copy of the weights costs more
+# the scoring policy (docs/COUNTED.md): the checker's description size and the general layer's kernel work
+# are bounded. The size budget is base + per_param * E in acceptcheck's units (a node 1, a numeral 1 per 2
+# bits), calibrated so that an honest checker fits (the pilot's column checker is about 6,000) and a copy of
+# the weights (at least about 12 E) does not, on networks with more than a few hundred weights; on a tiny
+# network the whole set of weights is smaller than any checker, and the budget cannot separate them. The
+# environment variables are hooks for tests; whatever is in force is in the policy digest and the receipt.
+SIZE_BUDGET_BASE = int(os.environ.get("ACCEPT_SIZE_BUDGET_BASE", 8192))
+SIZE_BUDGET_PER_PARAM = int(os.environ.get("ACCEPT_SIZE_BUDGET_PER_PARAM", 4))
 GENERAL_KERNEL_BUDGET_MS = 120_000  # kernel time to replay the general layer
 
 
-def literal_budget(extract: int) -> int:
-    return LITERAL_BUDGET_BASE + extract // LITERAL_BUDGET_PER_PARAM
+def size_budget(extract: int) -> int:
+    return SIZE_BUDGET_BASE + SIZE_BUDGET_PER_PARAM * extract
 
 
 class Reject(Exception):
@@ -533,7 +538,7 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     read = len(scored["certificate"])
     out = {"status": None, "reason": None, "assurance": ASSURANCE, "cost_model": COST_MODEL,
            "bill": None, "extract": extract, "read": read, "length": None,
-           "literals": None, "literal_budget": literal_budget(extract), "general_kernel_ms": None,
+           "description_size": None, "size_budget": size_budget(extract), "general_kernel_ms": None,
            "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS, "rest_kernel_ms": None, "axioms": None}
     read_extra = [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all
     # the checker touches numbers only through the counted primitives
@@ -569,10 +574,11 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
         out.update(status="refused", reason=f"the scored proofs depend on axioms that are not allowed: {', '.join(bad)}")
         return out
     general, rest = last.get("general") or {}, last.get("rest") or {}
-    out.update(literals=general.get("literals"), general_kernel_ms=general.get("kernel_ms"), rest_kernel_ms=rest.get("kernel_ms"),
-               general_constants=general.get("constants"))
-    if out["literals"] is None or out["literals"] > out["literal_budget"]:
-        out.update(status="refused", reason=f"the general layer's literal weight {out['literals']} exceeds the budget {out['literal_budget']}")
+    out.update(description_size=general.get("description_size"), general_kernel_ms=general.get("kernel_ms"),
+               rest_kernel_ms=rest.get("kernel_ms"), general_constants=general.get("constants"),
+               checker_constants=general.get("checker_constants"))
+    if out["description_size"] is None or out["description_size"] > out["size_budget"]:
+        out.update(status="refused", reason=f"the checker's description size {out['description_size']} exceeds the budget {out['size_budget']}")
         return out
     if out["general_kernel_ms"] is None or out["general_kernel_ms"] > GENERAL_KERNEL_BUDGET_MS:
         out.update(status="refused", reason=f"replaying the general layer took {out['general_kernel_ms']} ms, over the budget {GENERAL_KERNEL_BUDGET_MS} ms")
@@ -586,7 +592,7 @@ def policy_digest() -> str:
     """A digest of the scoring policy: the allowlist and the budgets."""
     h = hashlib.sha256()
     h.update(ALLOWLIST.read_bytes() if ALLOWLIST.exists() else b"")
-    h.update(json.dumps({"literal_budget": [LITERAL_BUDGET_BASE, LITERAL_BUDGET_PER_PARAM],
+    h.update(json.dumps({"size_budget": [SIZE_BUDGET_BASE, SIZE_BUDGET_PER_PARAM],
                          "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS,
                          "allowed_axioms": sorted(ALLOWED_AXIOMS), "trusted_prefixes": TRUSTED_PREFIXES}).encode())
     return h.hexdigest()[:16]

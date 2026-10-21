@@ -30,10 +30,11 @@ CompactCheck.Interp.eq
 CompactCheck.Interp.exp
 CompactCheck.Interp.charge
 CompactCheck.Interp.fail
-CompactCheck.Interp.ifN
-CompactCheck.Interp.ifV
-CompactCheck.Interp.ifB
-CompactCheck.Interp.ifU
+CompactCheck.Interp.btrue
+CompactCheck.Interp.bfalse
+CompactCheck.Interp.countB
+CompactCheck.Interp.nmask
+CompactCheck.Interp.selectV
 CompactCheck.Interp.bnot
 CompactCheck.Interp.band
 CompactCheck.Interp.bor

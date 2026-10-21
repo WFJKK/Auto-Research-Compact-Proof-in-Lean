@@ -248,43 +248,44 @@ partial def dependencyClosure (cs : Std.HashMap Name ConstantInfo) (roots : List
               if rinfo.all.contains i && !visited.contains r then stack := r :: stack
   return visited
 
-/-- The literal weight of an expression: per natural number literal, 1 per 16 bits (so a weight's mantissa
-    costs about 2 and a packed word costs more); per string literal, 1 per 8 bytes (a weight's name costs
-    2 or 3, a table hidden in a string costs its length); a numeral `OfNat.ofNat _ n _` counted once. This
-    is what the general layer's literal budget bounds: free data in the layer's statements and
-    definitions, a copy of the weights above all. -/
-partial def litWeight (e : Expr) : Nat :=
+/-- The description size of an expression: every node counts 1 (an application, a binder, a constant, a
+    variable), a natural number literal 1 per 2 bits, a string literal 1 per byte, so that a number of the
+    network costs about 15 however it is written (a numeral, a list of booleans, a Church numeral) and a
+    copy of the weights costs at least about 12 E; a numeral `OfNat.ofNat _ n _` counted once. A table can live in literals, in constructors, or in
+    the shape of applications alone (`fun c0 c1 z => c0 (c1 (c0 z))` carries bits), so the whole term is
+    measured. This bounds the description length of the general layer's data; it does not show the
+    absence of compressed information. -/
+partial def descSize (e : Expr) : Nat :=
   go e |>.run' {}
 where
   go (e : Expr) : StateM (Std.HashMap Expr Nat) Nat := do
     if let some n := (← get).get? e then return n
     let n ← match e with
-      | .lit (.natVal n) => pure (max 1 ((Nat.log2 n + 1 + 15) / 16))
-      | .lit (.strVal s) => pure (max 1 ((s.utf8ByteSize + 7) / 8))
+      | .lit (.natVal n) => pure (max 1 ((Nat.log2 n + 2) / 2))
+      | .lit (.strVal s) => pure (max 1 s.utf8ByteSize)
       | .app .. =>
         let f := e.getAppFn
         let args := e.getAppArgs
         if f.isConstOf ``OfNat.ofNat && args.size == 3 then
-          -- the type, the raw literal, the instance (which repeats the literal)
-          pure ((← go args[0]!) + (← go args[1]!))
+          pure (1 + (← go args[1]!))
         else
           let mut s ← go f
-          for a in args do s := s + (← go a)
+          for a in args do s := s + 1 + (← go a)
           pure s
-      | .lam _ ty b _ => pure ((← go ty) + (← go b))
-      | .forallE _ ty b _ => pure ((← go ty) + (← go b))
-      | .letE _ ty v b _ => pure ((← go ty) + (← go v) + (← go b))
+      | .lam _ ty b _ => pure (1 + (← go ty) + (← go b))
+      | .forallE _ ty b _ => pure (1 + (← go ty) + (← go b))
+      | .letE _ ty v b _ => pure (1 + (← go ty) + (← go v) + (← go b))
       | .mdata _ b => go b
-      | .proj _ _ b => go b
-      | _ => pure 0
+      | .proj _ _ b => pure (1 + (← go b))
+      | _ => pure 1
     modify (·.insert e n)
     return n
 
 /-- The computational closure of the checker: the candidate's definitions it uses, transitively, through
     definitions and never through theorems (a proof computes nothing). What the checker computes is a
     function of these bodies and of the interpreter, so this is where free data could steer it, and the
-    literal budget is measured here: over the bodies, with no exemption by name (a name is the author's
-    to choose). -/
+    description-size budget is measured here: over the bodies, with no exemption by name (a name is the
+    author's to choose). -/
 partial def computationalClosure (cs : Std.HashMap Name ConstantInfo) (root : Name) : NameSet := Id.run do
   let mut visited : NameSet := {}
   let mut stack : List Name := [root]
@@ -301,9 +302,9 @@ partial def computationalClosure (cs : Std.HashMap Name ConstantInfo) (root : Na
         if !visited.contains m && cs.contains m then stack := m :: stack
   return visited
 
-/-- The literal weight of a definition: its body. -/
+/-- The description size of a definition: its body. -/
 def bodyLitWeight (ci : ConstantInfo) : Nat :=
-  match ci.value? with | some v => litWeight v | none => 0
+  match ci.value? with | some v => descSize v | none => 0
 
 /-- Replay a set of the candidate's constants into the kernel environment, timed. -/
 def replayTimed (kenv : Kernel.Environment) (cs : Std.HashMap Name ConstantInfo) :
@@ -377,9 +378,29 @@ def runScore (prot D sound inst : Name) (n bill : Nat) (trusted : List Name) (ol
   jsonOut [("status", "accepted"), ("reason", Json.null),
     ("axioms", Json.arr (axioms.map fun a => Json.str a.toString)), ("replayed", Lean.toJson cs.size),
     ("general", Json.mkObj [("constants", Lean.toJson general.size), ("checker_constants", Lean.toJson comp.size),
-      ("literals", Lean.toJson lits), ("literals_by", Json.mkObj litsBy.toList), ("kernel_ms", Lean.toJson generalMs)]),
+      ("description_size", Lean.toJson lits), ("size_by", Json.mkObj litsBy.toList), ("kernel_ms", Lean.toJson generalMs)]),
     ("rest", Json.mkObj [("constants", Lean.toJson restMap.size), ("kernel_ms", Lean.toJson restMs)]),
     ("challenge_ms", Lean.toJson challengeMs)]
+  return 0
+
+/-! ## The description size of a checker, for calibration and for a candidate's own development -/
+
+def runSize (D : Name) (trusted : List Name) (oleans : List String) : IO UInt32 := do
+  initSearchPath (← findSysroot)
+  let env ← importModules (trusted.toArray.map fun m => { module := m : Import }) {} (trustLevel := 0)
+  let kenv := env.toKernelEnv
+  let cs ← match ← candidateConstants kenv oleans with
+    | .ok cs => pure cs
+    | .error e => return ← rejected e
+  let comp := computationalClosure cs D
+  let mut total : Nat := 0
+  let mut by_ : Array (String × Json) := #[]
+  for g in comp do
+    let some ci := cs.get? g | continue
+    let w := bodyLitWeight ci
+    total := total + w
+    by_ := by_.push (g.toString, Lean.toJson w)
+  jsonOut [("status", "ok"), ("size", Lean.toJson total), ("constants", Lean.toJson comp.size), ("by", Json.mkObj by_.toList)]
   return 0
 
 /-! ## The closure of a checker against the allowlist -/
@@ -481,6 +502,7 @@ def usage : String :=
   "usage: acceptcheck check <target> <candidate const> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck score <protected module> <checker> <sound> <instance> <count> <bill> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck lemma <theorem> <trusted modules...> -- <candidate oleans...>\n" ++
+  "       acceptcheck size <checker const> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck closure <checker const> <allowlist> <protected module> <trusted modules...> -- <candidate oleans...>\n" ++
   "       acceptcheck protected <network.json> <protected module> <protected olean>"
 
@@ -505,6 +527,13 @@ def main (args : List String) : IO UInt32 := do
     | _, _ =>
       IO.eprintln usage
       return 2
+  | "size" :: D :: rest =>
+    let (trusted, oleans) := rest.span (· != "--")
+    let oleans := oleans.drop 1
+    if oleans.isEmpty then
+      IO.eprintln usage
+      return 2
+    Accept.runSize D.toName (trusted.map String.toName) oleans
   | "closure" :: root :: allow :: prot :: rest =>
     let (trusted, oleans) := rest.span (· != "--")
     let oleans := oleans.drop 1

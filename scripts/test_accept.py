@@ -25,6 +25,7 @@ PROJECT = HERE.parent
 EXAMPLE = PROJECT / "examples" / "open_lane" / "max2_tiny_brute"
 SCORED = PROJECT / "examples" / "open_lane" / "max2_tiny_scored"
 AGENT = PROJECT / "examples" / "open_lane" / "max2_tiny_agent_cols23"
+PORT = PROJECT / "examples" / "open_lane" / "max2_tiny_cols23_v3"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -35,9 +36,16 @@ def work(tmp_path_factory):
     return tmp_path_factory.mktemp("accept-work")
 
 
-def submit(candidate: Path, work: Path, mode: str = "hardened") -> dict:
+SMALL_BUDGET = {"ACCEPT_SIZE_BUDGET_BASE": "512", "ACCEPT_SIZE_BUDGET_PER_PARAM": "1"}  # 592 on the tiny network
+
+
+def submit(candidate: Path, work: Path, mode: str = "hardened", env: dict | None = None) -> dict:
+    """Submit a candidate. With env SMALL_BUDGET the size budget is 592 on the tiny network: the brute-force
+    checker (about 370) fits, a copy of its 80 weights (about 1,200) does not. The default budget is
+    calibrated for real networks, where the weights outweigh any checker; on the tiny network they do not."""
     r = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "submit", str(candidate), "--repo", str(REPO),
-                        "--work", str(work), "--mode", mode], capture_output=True, text=True, timeout=3600)
+                        "--work", str(work), "--mode", mode], capture_output=True, text=True, timeout=3600,
+                       env={**os.environ, **(env or {})})
     assert r.stdout.strip(), r.stderr
     receipt = json.loads(r.stdout)
     assert (r.returncode == 0) == (receipt["status"] == "accepted")
@@ -204,7 +212,7 @@ def test_the_scored_proof_is_verified_and_scored(work):
     assert s["status"] == "scored", s["reason"]
     assert s["bill"] == 64 * 63 and s["read"] == 0 and s["extract"] == 80
     assert s["length"] == s["bill"] + s["extract"] + s["read"]
-    assert s["literals"] <= s["literal_budget"] and s["general_kernel_ms"] <= s["general_kernel_budget_ms"]
+    assert s["description_size"] <= s["size_budget"] and s["general_kernel_ms"] <= s["general_kernel_budget_ms"]
     assert set(s["axioms"]) <= {"propext", "Classical.choice", "Quot.sound"}
     assert [x["step"] for x in r["steps"]] == ["protected", "compile", "kernel", "closure", "score"]
 
@@ -252,11 +260,11 @@ def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_h
                                 table + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task (if table.length = 0 then [] else allInputs task.space)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                       "  intro w c n cost h\n  unfold numCorrect\n  simp only [D, table, List.length_cons, Nat.succ_ne_zero, ite_false] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
-    r = submit(scored_variant(tmp_path, "weights-copy", src), work)
+    r = submit(scored_variant(tmp_path, "weights-copy", src), work, env=SMALL_BUDGET)
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
-    assert s["status"] == "refused" and "literal weight" in s["reason"], s
-    assert s["literals"] >= len(nums)
+    assert s["status"] == "refused" and "description size" in s["reason"], s
+    assert s["description_size"] >= 12 * len(nums)
 
 
 def test_a_checker_outside_the_counted_language_is_refused_scoring(work, tmp_path):
@@ -376,8 +384,7 @@ def test_the_agents_pilot_proof_is_verified_and_refused_scoring_in_language_v2(w
 # ---- the handoff's remaining fixtures ----------------------------------------------------------------------
 def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_anti_hiding(work, tmp_path):
     """A copy of the weights encoded in a single big natural number (24 bits each) in a general-layer
-    definition: the literal measure charges 1 per 16 bits, so the copy weighs about 1.5 per weight and cannot
-    fit the budget 32 + E/8."""
+    definition: the measure charges a numeral 1 per 2 bits, so the copy weighs about 12 per weight."""
     sys.path.insert(0, str(HERE))
     import accept
     sys.path.pop(0)
@@ -392,11 +399,11 @@ def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_ant
                                 table + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task (if unpack packed 0 = 0 then [] else allInputs task.space)")
     src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                       "  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide : ¬ unpack packed 0 = 0)] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
-    r = submit(scored_variant(tmp_path, "weights-packed", src), work)
+    r = submit(scored_variant(tmp_path, "weights-packed", src), work, env=SMALL_BUDGET)
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
-    assert s["status"] == "refused" and "literal weight" in s["reason"], s
-    assert s["literals"] >= len(nums)
+    assert s["status"] == "refused" and "description size" in s["reason"], s
+    assert s["description_size"] >= 12 * len(nums)
 
 
 def test_option_overrides_in_the_candidate_do_not_reach_the_service(work, tmp_path):
@@ -422,7 +429,7 @@ def test_a_candidate_cannot_change_its_sources_during_evaluation(work, tmp_path)
 
 
 def test_renaming_or_hiding_a_definition_does_not_hide_its_data(work, tmp_path):
-    """The literal budget is measured over the checker's computational closure, whatever the names: a
+    """The size budget is measured over the checker's computational closure, whatever the names: a
     private definition, an underscore name or a `match_1` name carrying a copy of the weights is still
     counted, and the submission refused scoring."""
     sys.path.insert(0, str(HERE))
@@ -439,8 +446,62 @@ def test_renaming_or_hiding_a_definition_does_not_hide_its_data(work, tmp_path):
                                     f"(if {ident}.length = 0 then [] else allInputs task.space)")
         src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
                           f"  intro w c n cost h\n  unfold numCorrect\n  simp only [D, {ident}, List.length_cons, Nat.succ_ne_zero, ite_false] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
-        r = submit(scored_variant(tmp_path, name, src), work)
+        r = submit(scored_variant(tmp_path, name, src), work, env=SMALL_BUDGET)
         assert r["status"] == "accepted", (name, r["reason"])
         s = r["scoring"]
-        assert s["status"] == "refused" and "literal weight" in s["reason"], (name, s)
-        assert s["literals"] >= len(nums)
+        assert s["status"] == "refused" and "description size" in s["reason"], (name, s)
+        assert s["description_size"] >= 12 * len(nums)
+
+
+def test_a_table_of_booleans_or_a_church_encoding_is_refused_scoring_not_proving_anti_hiding(work, tmp_path):
+    """A copy of the weights as a list of booleans (one constructor per bit) and as a Church encoding (one
+    function per number applying `c0` or `c1` per bit, no numeral anywhere): the description size counts
+    every node, so both weigh more than the weights as numerals, and both are refused."""
+    sys.path.insert(0, str(HERE))
+    import accept
+    sys.path.pop(0)
+    accept._repo = REPO
+    net = json.loads(accept.export_network(REPO, "tests/max2_tiny", "max2_tiny-v8-s0", work).read_text())
+    nums = [abs(v) % (1 << 24) for w in net["weights"] for v in w["ints"]]
+    bits = [(v >> k) & 1 for v in nums for k in range(24)]
+    bools = "def table : List Bool := [" + ", ".join("true" if b else "false" for b in bits) + "]\n\n"
+    # one function per number (24 applications deep; a single 1920-deep term overflows the elaborator)
+    chunks = ", ".join("fun z => " + "".join(f"c{(v >> k) & 1} (" for k in range(24)) + "z" + ")" * 24 for v in nums)
+    church = (f"def table (c0 c1 : Nat → Nat) (z : Nat) : Nat := [{chunks}].foldl (fun z f => f z) z\n\n"
+              "def decoded : Nat := table (fun n => 2 * n) (fun n => 2 * n + 1) 0\n\n")
+    for name, defs, cond in (("bool-table", bools, "table.length = 0"), ("church-table", church, "decoded = 0")):
+        src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                    defs + "/-- The checker: every input of the task's space. -/\ndef D : Checker := fun I => countSingles I graph task "
+                                    f"(if {cond} then [] else allInputs task.space)")
+        # the tables are too large for simp to unfold (recursion depth), so the condition is decided by the kernel
+        proof = (f"  intro w c n cost h\n  unfold numCorrect\n  simp only [D] at h\n  rw [if_neg (by decide +kernel : ¬ {cond})] at h\n"
+                 "  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+        src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h", proof)
+        r = submit(scored_variant(tmp_path, name, src), work, env=SMALL_BUDGET)
+        assert r["status"] == "accepted", (name, r["reason"])
+        s = r["scoring"]
+        assert s["status"] == "refused" and "description size" in s["reason"], (name, s)
+        assert s["description_size"] >= 12 * len(nums), (name, s["description_size"])
+
+
+def test_branching_into_the_checkers_own_code_is_not_expressible(work, tmp_path):
+    """The reviewer's continuation counterexample `I.ifN bit (k 1) (k 0)`: with version 3 of the interface
+    there is no `ifN` (nor `ifB`, `ifV`, `ifU`), so the checker does not compile; the only uses of a truth
+    value are countB, nmask, selectV and the charged gates, none of which runs the checker's own code."""
+    src = SCORED_SOURCE.replace("    pure (I.nadd (I.countB ok) n)",
+                                "    I.ifN ok (pure (I.nadd (I.nofNat 1) n)) (pure (I.nadd (I.nofNat 0) n))")
+    assert src != SCORED_SOURCE
+    r = submit(scored_variant(tmp_path, "continuation", src), work)
+    assert r["status"] == "rejected" and "does not compile" in r["reason"] and "ifN" in r["reason"], r["reason"]
+
+
+def test_the_ported_column_proof_is_scored_under_language_v3(work):
+    """The agent's column proof ported by hand to version 3 (examples/open_lane/max2_tiny_cols23_v3): the
+    interface keeps a meaningful method expressible, provable and scoreable. 23 of 64, bill 549 (the
+    agent's 458 plus the charged gates), length 629; its description size calibrates the default budget."""
+    r = submit(PORT, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 23, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 549 and s["length"] == 629 and s["description_size"] <= s["size_budget"]
+    assert r["score_eligible"] is True

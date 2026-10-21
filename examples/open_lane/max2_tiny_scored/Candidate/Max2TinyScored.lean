@@ -7,9 +7,9 @@ import CompactCheck.CountedOps
 
 The same argument as `max2_tiny_brute`, written so that it has a length (docs/COUNTED.md): the checker
 `D : Checker` is a function of the interpreter `I`; it runs the single-input rule on every input through
-`I.single`, which the counting interpreter charges as one exact forward pass, and counts the passes with
-`I.ifN`. Nothing else in `D` touches a number of the network, and nothing in `D` can look inside `I.B` or
-`I.N`, so the bill is the single-rule cost times the number of inputs.
+`I.single`, which the counting interpreter charges as one exact forward pass, and adds `I.countB` of each
+result to the count. Nothing else in `D` touches a number of the network, nothing in `D` can look inside
+`I.B` or `I.N`, and nothing in `D` branches, so the bill is the single-rule cost times the number of inputs.
 
 * General layer: `countSingles`, `D`, and `D_sound`, for all weights and certificates (the certificate is
   empty here and never read). The soundness theorem is about `D Interp.counting`, the interpreter the
@@ -30,7 +30,7 @@ def countSingles (I : Interp) (g : Graph) (task : Task) : List Input → I.M I.N
   | x :: xs => do
     let ok ← I.single g task x
     let n ← countSingles I g task xs
-    I.ifN ok (pure (I.nsucc n)) (pure n)
+    pure (I.nadd (I.countB ok) n)
 
 /-- The checker: every input of the task's space. -/
 def D : Checker := fun I => countSingles I graph task (allInputs task.space)
@@ -51,11 +51,12 @@ theorem countSingles_le (env : Env) : ∀ (xs : List Input) (c : Cost) (n : Nat)
       · rename_i m c2 hm
         have ih := countSingles_le env xs c1 m c2 hm
         rw [List.countP_cons]
+        simp only [CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
         cases ok with
-        | false => simp only [Bool.cond_false, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h; omega
+        | false => simp only [Bool.cond_false, Nat.add_eq] at h; omega
         | true =>
           have hc : Correct graph env.weights task x := singleOk_correct graph env.weights task x (CostM.single_spec hs)
-          simp only [Bool.cond_true, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
+          simp only [Bool.cond_true, Nat.add_eq] at h
           simp only [hc, decide_true, ite_true]
           omega
       · cases h

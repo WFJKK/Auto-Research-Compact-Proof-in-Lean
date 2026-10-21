@@ -4,13 +4,15 @@ import CompactCheck.CountedCheck
 # The counted language, as an interface: a checker is written for every interpreter
 
 A scored checker is a function of an interpreter `I : Interp`: abstract numbers `I.V`, abstract booleans
-`I.B`, abstract counts `I.N`, in an abstract monad `I.M`, with every operation on a number charged by the
-interpreter and the only way to use a boolean being `I.ifN`, `I.ifV`, `I.ifB` and `I.ifU`. Because the
-checker has to make sense for every `I`, its own Lean code (recursion over lists, `Nat` indices, strings)
-can never look inside a value of `I.V`, `I.B` or `I.N`: whatever it learns about the network stays in
-the interpreter's hands, and the bill the interpreter keeps is the whole cost of the computation. This
-closes the hole of a language with concrete booleans, where a charged comparison yields a bit that free
-arithmetic can then use: here a bit cannot leave the monad.
+`I.B`, abstract counts `I.N`, in an abstract monad `I.M`, with every operation on a number or a truth
+value charged by the interpreter. There is no branching on a truth value: it can only become a count, a
+mask on a count, a choice between two numbers, or another truth value through a charged gate. Because the
+checker has to make sense for every `I`, and no operation hands a value of `I.V`, `I.B` or `I.N` back to
+its own Lean code in a form it can inspect, nothing the checker learns about the network can change what
+its own code does next: whatever it learns stays in the interpreter's hands, and the bill the interpreter
+keeps is the whole cost of the computation. This closes the holes of the two earlier versions (concrete
+booleans, then branching into the checker's own code: a reviewer's counterexample `I.ifN bit (k 1) (k 0)`
+let a bit reach `k` as a plain `Nat`).
 
 `Interp.counting` is the interpreter the service runs: `CostM` of `Counted.lean`, with `Q`, `Bool` and `Nat`.
 A submission's soundness theorem and instance theorem are about `D Interp.counting` (docs/COUNTED.md); the
@@ -136,15 +138,19 @@ structure Interp : Type 1 where
   charge : String → Nat → M Unit
   /-- Fail: the checker certifies nothing. -/
   fail : {α : Type} → M α
-  /-- Branching on a truth value: the only way to use one, and the result stays a count, a number, a
-      truth value or nothing, so no bit of information about the network ever reaches ordinary Lean. -/
-  ifN : B → M N → M N → M N
-  ifV : B → M V → M V → M V
-  ifB : B → M B → M B → M B
-  ifU : B → M Unit → M Unit → M Unit
-  bnot : B → B
-  band : B → B → B
-  bor : B → B → B
+  /-- The two constant truth values, free. -/
+  btrue : B
+  bfalse : B
+  /-- What a truth value can become, and nothing else: a count (`countB`: one if true), a mask on a count
+      (`nmask`: the count if true, else zero), a choice between two numbers (`selectV`, charged 1 like
+      `min`), or another truth value through a gate (charged 1 each). There is no branching: a checker's
+      own code never learns a truth value, so what it computes next never depends on the network. -/
+  countB : B → N
+  nmask : B → N → N
+  selectV : String → B → V → V → M V
+  bnot : String → B → M B
+  band : String → B → B → M B
+  bor : String → B → B → M B
   /-- Counts. Free, as the Python checker's bookkeeping is. -/
   nzero : N
   nsucc : N → N
@@ -184,13 +190,14 @@ abbrev Checker := (I : Interp) → I.M I.N
   exp := CostM.qexp
   charge := CostM.charge
   fail := CostM.fail
-  ifN := fun b t e => cond b t e
-  ifV := fun b t e => cond b t e
-  ifB := fun b t e => cond b t e
-  ifU := fun b t e => cond b t e
-  bnot := not
-  band := and
-  bor := or
+  btrue := true
+  bfalse := false
+  countB := fun b => cond b 1 0
+  nmask := fun b n => cond b n 0
+  selectV := fun cat b x y => ⟨fun _ c => some (cond b x y, c.add cat 1)⟩
+  bnot := fun cat b => ⟨fun _ c => some (!b, c.add cat 1)⟩
+  band := fun cat a b => ⟨fun _ c => some (a && b, c.add cat 1)⟩
+  bor := fun cat a b => ⟨fun _ c => some (a || b, c.add cat 1)⟩
   nzero := 0
   nsucc := Nat.succ
   nadd := Nat.add
@@ -223,17 +230,18 @@ namespace Interp
 @[simp] theorem counting_eq : counting.eq = CostM.qeq := rfl
 @[simp] theorem counting_exp : counting.exp = CostM.qexp := rfl
 @[simp] theorem counting_charge : counting.charge = CostM.charge := rfl
-@[simp] theorem counting_ifN (b : counting.B) (t e : counting.M counting.N) :
-    counting.ifN b t e = cond b t e := rfl
-@[simp] theorem counting_ifV (b : counting.B) (t e : counting.M counting.V) :
-    counting.ifV b t e = cond b t e := rfl
-@[simp] theorem counting_ifB (b : counting.B) (t e : counting.M counting.B) :
-    counting.ifB b t e = cond b t e := rfl
-@[simp] theorem counting_ifU (b : counting.B) (t e : counting.M Unit) :
-    counting.ifU b t e = cond b t e := rfl
-@[simp] theorem counting_bnot : counting.bnot = not := rfl
-@[simp] theorem counting_band : counting.band = and := rfl
-@[simp] theorem counting_bor : counting.bor = or := rfl
+@[simp] theorem counting_btrue : counting.btrue = true := rfl
+@[simp] theorem counting_bfalse : counting.bfalse = false := rfl
+@[simp] theorem counting_countB (b : counting.B) : counting.countB b = cond b 1 0 := rfl
+@[simp] theorem counting_nmask (b : counting.B) (n : counting.N) : counting.nmask b n = cond b n 0 := rfl
+theorem counting_selectV_run (cat : String) (b : Bool) (x y : Q) (env : Env) (c : Cost) :
+    (counting.selectV cat b x y).run env c = some (cond b x y, c.add cat 1) := rfl
+theorem counting_bnot_run (cat : String) (b : Bool) (env : Env) (c : Cost) :
+    (counting.bnot cat b).run env c = some (!b, c.add cat 1) := rfl
+theorem counting_band_run (cat : String) (a b : Bool) (env : Env) (c : Cost) :
+    (counting.band cat a b).run env c = some (a && b, c.add cat 1) := rfl
+theorem counting_bor_run (cat : String) (a b : Bool) (env : Env) (c : Cost) :
+    (counting.bor cat a b).run env c = some (a || b, c.add cat 1) := rfl
 @[simp] theorem counting_nzero : counting.nzero = (0 : Nat) := rfl
 @[simp] theorem counting_nsucc : counting.nsucc = Nat.succ := rfl
 @[simp] theorem counting_nadd : counting.nadd = Nat.add := rfl
