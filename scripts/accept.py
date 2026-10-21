@@ -463,8 +463,9 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
         receipt["isolation"] = mode if mode == "landlock" else "process (weak: no Landlock here)"
         lean = lean_binary()
         lp = lean_path()
-        receipt["digests"]["toolchain"] = (toolchain_root(lean) / "bin" / "lean").name + ":" + sha256_file(lean)[:16]
-        receipt["digests"]["lean_project"] = project_digest()
+        # the service's identity, as `accept.py identity` reports it: a run checks every receipt against the
+        # identity it recorded when it started
+        receipt["digests"].update({k: v for k, v in identity().items() if k != "dirty"})
         # the modules and their imports
         modules = {}
         for rel in manifest["modules"]:
@@ -477,7 +478,6 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
         net_json = export_network(repo, manifest["model"], manifest["network"], work)
         receipt["digests"]["network_file"] = sha256_file(net_json)
         scored = manifest.get("scored")
-        receipt["digests"]["policy"] = policy_digest()
         prot = build_protected(net_json, manifest["claimed_count"], work, lean, lp, mode,
                                scored["certificate"] if scored else None)
         receipt["domain_size"] = prot["domain"]
@@ -654,12 +654,15 @@ def compile_for_development(ws: Path, rel: str, repo: Path, model: str, network:
             "protected_module": prot["module"], "messages": text, "seconds": round(res["seconds"], 1)}
 
 
+IDENTITY_KEYS = ("commit", "toolchain", "lean_project", "policy", "acceptcheck")
+
+
 def identity() -> dict:
     """What the service is, for a run to record when it starts and to check when it resumes: the Lean
-    project's commit and whether tracked files are modified, the digests every receipt carries (the
-    toolchain, the project's trusted sources, the policy as it is in force, environment hooks included) and
-    the acceptcheck binary. A receipt whose digests differ from the identity a run recorded was made by a
-    different service."""
+    project's commit and whether tracked files are modified, the toolchain, the project's trusted sources,
+    the policy as it is in force (environment hooks included) and the acceptcheck binary. Every receipt
+    carries these five digests (IDENTITY_KEYS) under `digests`; a receipt whose digests differ from the
+    identity a run recorded was made by a different service."""
     lean = lean_binary()
     try:
         head = subprocess.run(["git", "-C", str(LEAN_PROJECT), "rev-parse", "HEAD"], capture_output=True, text=True,

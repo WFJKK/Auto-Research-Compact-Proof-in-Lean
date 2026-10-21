@@ -618,8 +618,9 @@ def test_the_service_reports_the_identity_its_receipts_carry(work):
     assert set(ident) == {"commit", "dirty", "toolchain", "lean_project", "policy", "acceptcheck"}
     receipt = submit(SCORED, work)
     assert receipt["status"] == "accepted"
-    for k in ("toolchain", "lean_project", "policy"):
+    for k in ("commit", "toolchain", "lean_project", "policy", "acceptcheck"):
         assert receipt["digests"][k] == ident[k], k
+    assert "dirty" not in receipt["digests"]
     with_hook = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "identity"], capture_output=True, text=True,
                                timeout=600, env={**os.environ, **SMALL_BUDGET})
     assert json.loads(with_hook.stdout)["policy"] != ident["policy"]  # the hooks are part of the policy
