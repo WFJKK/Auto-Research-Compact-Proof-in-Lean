@@ -2,4 +2,4 @@
  "network": "max2_tiny-v8-s0", "claimed_count": 23, "theorem": "Candidate.Max2Cols23V3.performance",
  "modules": ["Candidate/Max2Cols23V3.lean"],
  "scored": {"checker": "Candidate.Max2Cols23V3.D", "sound": "Candidate.Max2Cols23V3.D_sound",
-            "instance": "Candidate.Max2Cols23V3.D_instance", "certificate": [], "claimed_bill": 549}}
+            "instance": "Candidate.Max2Cols23V3.D_instance", "certificate": [], "claimed_bill": 562}}

@@ -89,11 +89,14 @@ CHECK_TIMEOUT_S = 3600
 MEMORY_MB = 12288  # virtual: Mathlib's .olean files are mapped into memory
 ALLOWLIST = LEAN_PROJECT / "accept" / "allowlist.txt"
 # the scoring policy (docs/COUNTED.md): the checker's description size and the general layer's kernel work
-# are bounded. The size budget is base + per_param * E in acceptcheck's units (a node 1, a numeral 1 per 2
-# bits), calibrated so that an honest checker fits (the pilot's column checker is about 6,000) and a copy of
-# the weights (at least about 12 E) does not, on networks with more than a few hundred weights; on a tiny
-# network the whole set of weights is smaller than any checker, and the budget cannot separate them. The
-# environment variables are hooks for tests; whatever is in force is in the policy digest and the receipt.
+# are bounded. The size budget is base + per_param * E in acceptcheck's units (a node 1, a numeral or a
+# string 1 per bit), calibrated so that an honest checker fits (the pilot's column checker is under 8,000)
+# and a copy of the weights does not: an exported weight has 23 to 35 bits (its mantissa, shifted to the
+# tensor's common exponent), so a copy costs at least about 24 E however it is written, against 4 E plus
+# the base, on every network of the zoo with E above about 400 (max2 v64 has 1,088; scripts/test_accept.py
+# checks the arithmetic on every exported network). On a tiny network (E = 80) the whole set of weights is
+# smaller than any checker, and the budget cannot separate them. The environment variables are hooks for
+# tests; whatever is in force is in the policy digest and the receipt.
 SIZE_BUDGET_BASE = int(os.environ.get("ACCEPT_SIZE_BUDGET_BASE", 8192))
 SIZE_BUDGET_PER_PARAM = int(os.environ.get("ACCEPT_SIZE_BUDGET_PER_PARAM", 4))
 GENERAL_KERNEL_BUDGET_MS = 120_000  # kernel time to replay the general layer
@@ -232,6 +235,14 @@ def export_network(repo: Path, model: str, network: str, work: Path) -> Path:
             raise Unsupported(f"the network cannot be exported for the Lean checker: {msg}")
         raise Infra(f"export failed: {msg}")
     return out
+
+
+def excerpt(text: str, head: int = 1500, tail: int = 500) -> str:
+    """The first errors and the last lines of a compiler's output: the first error is the one that matters,
+    and a later one (a `decide` that cannot reduce) can be thousands of lines on its own."""
+    if len(text) <= head + tail:
+        return text
+    return text[:head] + "\n[...]\n" + text[-tail:]
 
 
 def box_env(ws: Path, lean: Path, lp: list[str]) -> dict:
@@ -487,7 +498,7 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
                 receipt.update(status="timeout", reason=f"compiling {m} exceeded {COMPILE_TIMEOUT_S} s")
                 return finish(receipt, work, t0)
             if res["rc"] != 0:
-                raise Reject(f"{m} does not compile: {(res['stdout'] + res['stderr'])[-2000:]}")
+                raise Reject(f"{m} does not compile: {excerpt(res['stdout'] + res['stderr'])}")
             oleans.append(res["olean"])
         # the kernel
         trusted = [prot["module"]] + sorted({d for ds in deps.values() for d in ds if not d.startswith("Candidate.")})

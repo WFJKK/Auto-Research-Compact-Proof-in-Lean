@@ -3,15 +3,17 @@ import CompactCheck.Soundness
 import CompactCheck.CountedOps
 
 /-!
-# Max-of-2 via the columns of `M = U L E`, on five tokens: the agent's proof, ported to language v3
+# Max-of-2 via the columns of `M = U L E`, on five tokens: the agent's proof, ported to language v4
 
 A human-assisted port (21 October 2026) of the agent's pilot proof `max2_tiny_agent_cols23`, written in the
-first counted language, to version 3 of the interface: the checker is a function of the interpreter `I`,
-every number is an `I.V`, every truth value an `I.B`, the count an `I.N`, and there is no branching on a
-truth value. The mathematics and the plan are the agent's, unchanged; what changed is the shape of the
-checker (`I.band` for `&&`, `I.nmask` for `if ok then ... else ...`, `I.countB`, `I.bfalse`), the
-specification lemmas (now about `Interp.counting`'s operations), and the bill: the gates are charged, so a
-pair costs 8 adds, 7 comparisons and 6 gates instead of 8 and 7.
+first counted language, to version 4 of the interface: the checker is a function of the interpreter `I`,
+every number is an `I.V`, every truth value an `I.B`, the count an `I.N`, there is no branching on a truth
+value, and a count is only a sum of concrete multiples of truth values. The mathematics and the plan are
+the agent's, unchanged; what changed is the shape of the checker (`I.band` for `&&`, `I.nscale k` for
+`if ok then k else 0`, `I.bfalse`), the specification lemmas (now about `Interp.counting`'s operations),
+and the bill: the gates are charged, so a pair costs 8 adds, 7 comparisons and 7 gates instead of 8 and 7
+(the seventh gate joins the pair's result with the single's, which in version 3 masked the whole count for
+nothing).
 
 The network is linear in the summed one-hot: `logits(a, b) = M[:, a] + M[:, b]` with `M = U L E`.
 The checker computes each needed column of `M` once, adds two columns per input pair and compares; one
@@ -126,12 +128,15 @@ def pairInputs : List (Nat × Nat) → List Input
   | [] => []
   | (a, b) :: ps => (if a = b then [[a, a]] else [[a, b], [b, a]]) ++ pairInputs ps
 
-def runPairs (cols : List (Nat × List I.V)) : List (Nat × Nat) → I.M I.N
+/-- Every pair's result is joined with `ok0` (the single's result) through a charged gate, and the
+    pair's inputs are counted through `nscale`: a count is only ever a sum of such terms. -/
+def runPairs (cols : List (Nat × List I.V)) (ok0 : I.B) : List (Nat × Nat) → I.M I.N
   | [] => pure I.nzero
   | (a, b) :: ps => do
     let ok ← checkPair I cols a b
-    let n ← runPairs cols ps
-    pure (I.nadd (I.nmask ok (I.nofNat (pairInputs [(a, b)]).length)) n)
+    let okk ← I.band cat ok0 ok
+    let n ← runPairs cols ok0 ps
+    pure (I.nadd (I.nscale (pairInputs [(a, b)]).length okk) n)
 
 def computeCols : List Nat → I.M (List (Nat × List I.V))
   | [] => pure []
@@ -156,14 +161,15 @@ def x0Inputs : Input → List Input
 
 /-- The checker on a plan: one `single` on `x0` (well-formedness, and `x0` with its mirror), then the
     columns of `M` for `toks` and the exact check of every pair `(a, b)`, `a ≤ b`. The single's result
-    masks the whole count (no branching on it); the shapes, being concrete, may be branched on. -/
+    gates every pair's result (no branching on it, and no free mask on the count); the shapes, being
+    concrete, may be branched on. -/
 def DPlan (x0 : Input) (toks : List Nat) (pairs : List (Nat × Nat)) : I.M I.N := do
   let ok0 ← I.single graph task x0
   let sh ← shapesOk I
   if sh then
     let cols ← computeCols I toks
-    let n ← runPairs I cols pairs
-    pure (I.nmask ok0 (I.nadd n (I.nofNat (x0Inputs x0).length)))
+    let n ← runPairs I cols ok0 pairs
+    pure (I.nadd n (I.nscale (x0Inputs x0).length ok0))
   else pure I.nzero
 
 /-- All `(a, b)` with `a ≤ b < n`. -/
@@ -700,12 +706,31 @@ theorem correct_of_margins {w : Weights ℚ} {tE tL tU : Tensor ℚ} (hw : WF w 
       rw [add_comm (Ment tE tL tU b j), add_comm (Ment tE tL tU b b)]
       exact hm j hj hne
 
+/-- With the single's result false, every gate is false and the count is zero. -/
+theorem runPairs_zero {env : Env} {cols : List (Nat × List Q)} :
+    ∀ {ps : List (Nat × Nat)} {c c' : Cost} {n : Nat},
+      (runPairs K cols false ps).run env c = some (n, c') → n = 0
+  | [], c, c', n, h => by
+    simp only [runPairs] at h
+    exact (pure_some h).1
+  | (a, b) :: ps, c, c', n, h => by
+    simp only [runPairs] at h
+    obtain ⟨ok, c1, hok, h⟩ := bind_some h
+    obtain ⟨okk, c2, hokk, h⟩ := bind_some h
+    obtain ⟨m, c3, hm, h⟩ := bind_some h
+    obtain ⟨hn, -⟩ := pure_some h
+    subst hn
+    rw [Interp.counting_band_run] at hokk
+    simp only [Bool.false_and, Option.some.injEq, Prod.mk.injEq] at hokk
+    rw [← hokk.1, runPairs_zero hm]
+    rfl
+
 open Classical in
 theorem runPairs_le {env : Env} {tE tL tU : Tensor ℚ} (hw : WF env.weights tE tL tU)
     {cols : List (Nat × List Q)}
     (hcols : ∀ p ∈ cols, p.2.map Q.val = (List.range d8).map (Ment tE tL tU p.1)) :
     ∀ {ps : List (Nat × Nat)} {c c' : Cost} {n : Nat}, (∀ p ∈ ps, p.1 ≤ p.2) →
-      (runPairs K cols ps).run env c = some (n, c') →
+      (runPairs K cols true ps).run env c = some (n, c') →
       n ≤ (pairInputs ps).countP fun x => decide (Correct graph env.weights task x)
   | [], c, c', n, _, h => by
     simp only [runPairs] at h
@@ -714,16 +739,20 @@ theorem runPairs_le {env : Env} {tE tL tU : Tensor ℚ} (hw : WF env.weights tE 
   | (a, b) :: ps, c, c', n, hps, h => by
     simp only [runPairs] at h
     obtain ⟨ok, c1, hok, h⟩ := bind_some h
-    obtain ⟨m, c2, hm, h⟩ := bind_some h
+    obtain ⟨okk, c2, hokk, h⟩ := bind_some h
+    obtain ⟨m, c3, hm, h⟩ := bind_some h
     obtain ⟨hn, -⟩ := pure_some h
     subst hn
+    rw [Interp.counting_band_run] at hokk
+    simp only [Bool.true_and, Option.some.injEq, Prod.mk.injEq] at hokk
+    rw [← hokk.1]
     have ih := runPairs_le hw hcols (fun p hp => hps p (List.mem_cons_of_mem _ hp)) hm
     have hab : a ≤ b := hps (a, b) List.mem_cons_self
     simp only [pairInputs, List.countP_append]
     cases ok with
     | false => simp only [Bool.cond_false, Nat.add_eq, Nat.zero_add]; omega
     | true =>
-      simp only [Bool.cond_true, Nat.add_eq, id]
+      simp only [Bool.cond_true, Nat.add_eq]
       obtain ⟨hb, hmarg⟩ := checkPair_spec hcols hok
       obtain ⟨h1, h2⟩ := correct_of_margins hw hab hb hmarg
       by_cases hab' : a = b
@@ -773,9 +802,9 @@ theorem DPlan_le {a b : Nat} (ha : a < d8) (hb : b < d8) {toks : List Nat} {pair
     obtain ⟨hn, -⟩ := pure_some h
     subst hn
     cases ok0 with
-    | false => simp only [Bool.cond_false]; exact Nat.zero_le _
+    | false => simp only [Bool.cond_false, Nat.add_eq, runPairs_zero hm]; exact Nat.zero_le _
     | true =>
-      simp only [Bool.cond_true, Nat.add_eq, id]
+      simp only [Bool.cond_true, Nat.add_eq]
       have hsingle := CostM.single_spec hok0
       obtain ⟨tE, tL, tU, hE, hEs, hL, hLs, hU, hUs⟩ := shapesOk_spec hsh
       obtain ⟨out, hout⟩ := evalGraph_of_singleOk hsingle
@@ -810,7 +839,7 @@ theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
 
 /-! ## Specific layer -/
 
-theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (23, 549) := by
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (23, 562) := by
   decide +kernel
 
 theorem performance : Target := by

@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 3, 21 October)
+# The counted language (step 2 of the open lane; version 4, 21 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -19,16 +19,24 @@ A checker is a function of an interpreter:
 
 `Interp` (CountedOps.lean) is a structure of abstract types and operations: a monad `M`, numbers `V`,
 truth values `B`, counts `N`; `weight`, `cert`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
-`max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nmask`, `selectV`,
+`max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nscale`, `selectV`,
 `bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
 `single` and `interval`. The checker's own code is ordinary Lean on lists, `Nat` indices and strings
 around these calls, and it has to typecheck for every `I`: so it can never look inside a value of `I.V`,
-`I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`), a mask
-on a count (`nmask`), a choice between two numbers (`selectV`, charged) or another truth value through a
-charged gate; a count can only grow. So nothing learned about the network ever decides what the
-checker's own code does next, and the bill the interpreter keeps is the whole cost of the computation.
-The shapes of the weights (`weightShape`) and the certificate's size are concrete and may be branched
-on: they are public structure, not the network's numbers.
+`I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`, or
+`nscale k`: a concrete `k` if true), a choice between two numbers (`selectV`, charged) or another truth
+value through a charged gate. So nothing learned about the network ever decides what the checker's own
+code does next, and the bill the interpreter keeps is the whole cost of the computation. The shapes of
+the weights (`weightShape`) and the certificate's size are concrete and may be branched on: they are
+public structure, not the network's numbers.
+
+Counts are terminal. The operations that make an `N` are `nzero`, `nsucc`, `nadd`, `nofNat` (concrete
+numbers) and `countB`, `nscale` (a concrete multiple of one truth value); none takes a count together
+with a truth value or a number, and none takes a count and returns anything but a count. So every count
+is a sum of concrete numbers and concrete multiples of truth values that charged operations produced, and
+a count never encodes a computation on the network: a product of two truth values exists only through a
+charged gate. The full list of signatures is the structure itself (CountedOps.lean); the test
+`test_a_decision_tree_over_truth_values_bills_every_node` shows what the rule costs.
 
 `Interp.counting` is the interpreter the service runs: `M` is `CostM` (Counted.lean, a structure around
 `Env → Cost → Option (α × Cost)` with the weights and the certificate in `Env` and the bill in `Cost`),
@@ -52,7 +60,7 @@ counting interpreter is a `CostM` function with a specification lemma (`CostM.si
 `CostM.interval_spec`, `run_bind`, `run_pure`, `exec_of_billed`), and `Interp.counting` is reducible, so a
 soundness proof unfolds `D Interp.counting` to those functions and never looks inside the monad.
 
-### Why this shape, after two reviews
+### Why this shape, after three reviews
 
 The first version (20 October, morning) was a concrete monad, `D : CostM Nat`, with `Bool` results from
 the charged comparisons and free `Nat` arithmetic: a reviewer showed that bits from comparisons can be
@@ -60,9 +68,14 @@ turned back into numbers by free arithmetic, so a checker could binary-search ev
 charged operations each and then run the network for nothing. The second version (that evening) made
 numbers, truth values and counts abstract but kept `ifN : B → M N → M N → M N` and free gates: the
 reviewer showed that `I.ifN bit (k 1) (k 0)` hands the bit to the checker's own code `k` through which
-branch runs, whatever the branch returns, and that gates alone give bit-level arithmetic. Hence version
-3: no branching into the checker's code at all, gates charged. This is the shape of the split-tree
-checker too, whose structure comes from the certificate and whose results only become counts.
+branch runs, whatever the branch returns, and that gates alone give bit-level arithmetic. Version 3 (21
+October) removed branching and charged the gates, but kept a free mask `nmask : B → N → N`: the reviewer
+showed that `nadd (nmask b (k 1)) (nmask nb (k 0))` is a conditional on counts, so a recursive decoder
+selects `f` of the number a list of truth values spells, for nothing, with `f` any Lean function. Hence
+version 4: no operation takes a count and a truth value; a truth value becomes a count only as a concrete
+multiple (`nscale`), and a product of truth values costs a gate. The decoder written in version 4
+(`examples/open_lane/max2_tiny_decision_tree`) bills every node of its tree. This is the shape of the
+split-tree checker too, whose structure comes from the certificate and whose results only become counts.
 
 ## The check (`acceptcheck closure`)
 
@@ -136,14 +149,19 @@ check, the service enforces, as policy (recorded in the receipt's policy digest)
 - a description-size budget: the size of the checker's computational closure (the checker and the
   definitions it uses, transitively through definitions and never through theorems: what it computes is
   a function of these bodies and of the interpreter), every node of every body counted 1, a numeral 1 per
-  2 bits, a string 1 per byte, with no exemption by name, is at most `8192 + 4 E`. A reviewer showed that
-  data can live in constructors (`[true, false, ...]`) and in the shape of applications alone
-  (`fun c0 c1 z => c0 (c1 (c0 z))`), so the whole term is measured, and the rates make a number of the
-  network cost about 15 however it is written: a copy of the weights costs at least about `12 E`, the
-  pilot's column checker about 7,400. This bounds description length; it does not show the absence of
-  compressed information, and on a network of a few hundred weights the whole set of weights is smaller
-  than any checker, so the budget separates nothing there (the tests use a smaller base through an
-  environment hook, recorded in the policy digest);
+  bit, a string 8 per byte, measured as a DAG, with no exemption by name, is at most `8192 + 4 E`. A
+  reviewer showed that data can live in constructors (`[true, false, ...]`) and in the shape of
+  applications alone (`fun c0 c1 z => c0 (c1 (c0 z))`), so the whole term is measured, and the rates make
+  a number of `b` bits cost at least `b` however it is written (a numeral or a string `b`, constructors
+  or applications at least `2 b`). An exported weight has 23 to 35 bits (its mantissa over the tensor's
+  common exponent), so a copy of the weights costs at least about `24 E`, against `4 E` plus the base: on
+  every size setting of the pipeline's zoo a copy is over the budget (max2 v64, E = 1,088: at least
+  34,044 against 12,544; `scripts/test_accept.py` checks the arithmetic on the zoo and refuses an actual
+  copy on max2 v64 under the default policy), while the pilot's column checker is under 8,000. This
+  bounds description length; it does not show the absence of compressed information, and on the tiny
+  test network (E = 80) the whole set of weights is smaller than any checker, so the budget separates
+  nothing there (its tests use a smaller base through an environment hook, recorded in the policy
+  digest);
 - a kernel budget: replaying the general layer (timed on its own, before the rest) takes at most 120 s.
 
 These bound what the general layer can hide; they do not prove that nothing is hidden. The adversarial

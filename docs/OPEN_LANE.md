@@ -60,7 +60,11 @@ that never mentions the weights (a checker `D` and the theorem `D w ≤ numCorre
 and the kernel evaluates it on all 64 inputs of a tiny network (`tests/max2_tiny` in the pipeline). A proof
 in this shape is verified; to get a length as well, `D` is written in the counted language as a function
 of the interpreter (`docs/COUNTED.md`), as `examples/open_lane/max2_tiny_scored` does, and the manifest's
-`scored` block names the checker, its soundness theorem and its instance.
+`scored` block names the checker, its soundness theorem and its instance. The other examples:
+`max2_tiny_agent_cols23`, the pilot agent's proof in the first counted language (verified, refused
+scoring); `max2_tiny_cols23_v3`, that proof ported by hand to the current language (scored);
+`max2_tiny_decision_tree`, a reviewer's counterexample written in the current language, where it bills
+every node of its tree.
 
 ## Kinds of submission
 

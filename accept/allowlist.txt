@@ -33,7 +33,7 @@ CompactCheck.Interp.fail
 CompactCheck.Interp.btrue
 CompactCheck.Interp.bfalse
 CompactCheck.Interp.countB
-CompactCheck.Interp.nmask
+CompactCheck.Interp.nscale
 CompactCheck.Interp.selectV
 CompactCheck.Interp.bnot
 CompactCheck.Interp.band

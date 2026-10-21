@@ -1,0 +1,5 @@
+{"schema": "open-lane-candidate-v1", "candidate_id": "max2-tiny-decision-tree", "model": "tests/max2_tiny",
+ "network": "max2_tiny-v8-s0", "claimed_count": 0, "theorem": "Candidate.Max2TinyTree.performance",
+ "modules": ["Candidate/Max2TinyTree.lean"],
+ "scored": {"checker": "Candidate.Max2TinyTree.D", "sound": "Candidate.Max2TinyTree.D_sound",
+            "instance": "Candidate.Max2TinyTree.D_instance", "certificate": [], "claimed_bill": 53}}

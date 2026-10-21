@@ -26,6 +26,7 @@ EXAMPLE = PROJECT / "examples" / "open_lane" / "max2_tiny_brute"
 SCORED = PROJECT / "examples" / "open_lane" / "max2_tiny_scored"
 AGENT = PROJECT / "examples" / "open_lane" / "max2_tiny_agent_cols23"
 PORT = PROJECT / "examples" / "open_lane" / "max2_tiny_cols23_v3"
+TREE = PROJECT / "examples" / "open_lane" / "max2_tiny_decision_tree"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -39,10 +40,17 @@ def work(tmp_path_factory):
 SMALL_BUDGET = {"ACCEPT_SIZE_BUDGET_BASE": "512", "ACCEPT_SIZE_BUDGET_PER_PARAM": "1"}  # 592 on the tiny network
 
 
+def copy_bound(nums: list[int]) -> int:
+    """The least any encoding of these numbers can measure: one unit per bit (a numeral or a string; a list
+    of booleans or a Church numeral costs at least twice that)."""
+    return sum(max(1, abs(v).bit_length()) for v in nums)
+
+
 def submit(candidate: Path, work: Path, mode: str = "hardened", env: dict | None = None) -> dict:
     """Submit a candidate. With env SMALL_BUDGET the size budget is 592 on the tiny network: the brute-force
-    checker (about 370) fits, a copy of its 80 weights (about 1,200) does not. The default budget is
-    calibrated for real networks, where the weights outweigh any checker; on the tiny network they do not."""
+    checker (about 370) fits, a copy of its 80 weights (over 1,700) does not. The default budget is
+    calibrated for real networks, where the weights outweigh any checker; on the tiny network they do not
+    (test_a_copy_of_the_weights_is_refused_under_the_default_policy_on_a_real_network uses the default)."""
     r = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "submit", str(candidate), "--repo", str(REPO),
                         "--work", str(work), "--mode", mode], capture_output=True, text=True, timeout=3600,
                        env={**os.environ, **(env or {})})
@@ -252,7 +260,7 @@ def test_the_general_layer_may_not_touch_the_weights_not_proving_anti_hiding(wor
 
 
 def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_hiding(work, tmp_path):
-    """A general-layer definition carrying the network's numbers as literals goes over the literal budget."""
+    """A general-layer definition carrying the network's numbers as literals goes over the size budget."""
     net = json.loads((work / "networks" / "max2_tiny-v8-s0.json").read_text())
     nums = [abs(v) for w in net["weights"] for v in w["ints"]]
     table = "def table : List Nat := [" + ", ".join(str(v) for v in nums) + "]\n\n"
@@ -264,7 +272,7 @@ def test_a_copy_of_the_weights_as_literals_is_refused_scoring_not_proving_anti_h
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
     assert s["status"] == "refused" and "description size" in s["reason"], s
-    assert s["description_size"] >= 12 * len(nums)
+    assert s["description_size"] >= copy_bound(nums)
 
 
 def test_a_checker_outside_the_counted_language_is_refused_scoring(work, tmp_path):
@@ -369,11 +377,11 @@ def test_the_development_compile_reports_errors_and_never_accepts(work, tmp_path
     assert not list((work / "receipts").glob("*Dev*"))  # a compile is not a submission
 
 
-def test_the_agents_pilot_proof_is_verified_and_refused_scoring_in_language_v2(work):
+def test_the_agents_pilot_proof_is_verified_and_refused_scoring_in_the_current_language(work):
     """The pilot's third submission of round 1 (20 October 2026), kept as the agent wrote it: the columns of
     M = U L E, 23 of 64 inputs for a bill of 458. It was written in the first counted language (a concrete
-    `CostM Nat`, with concrete booleans); language v2 (a checker is a function of the interpreter) refuses
-    it: its checker uses `CostM` directly. Its mathematics is still verified."""
+    `CostM Nat`, with concrete booleans); every later version (a checker is a function of the interpreter)
+    refuses it: its checker uses `CostM` directly. Its mathematics is still verified."""
     r = submit(AGENT, work)
     assert r["status"] == "accepted" and r["certified_count"] == 23, r["reason"]
     s = r["scoring"]
@@ -384,7 +392,7 @@ def test_the_agents_pilot_proof_is_verified_and_refused_scoring_in_language_v2(w
 # ---- the handoff's remaining fixtures ----------------------------------------------------------------------
 def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_anti_hiding(work, tmp_path):
     """A copy of the weights encoded in a single big natural number (24 bits each) in a general-layer
-    definition: the measure charges a numeral 1 per 2 bits, so the copy weighs about 12 per weight."""
+    definition: the measure charges a numeral 1 per bit, so the copy weighs 24 per weight."""
     sys.path.insert(0, str(HERE))
     import accept
     sys.path.pop(0)
@@ -403,7 +411,7 @@ def test_the_weights_packed_into_one_literal_are_refused_scoring_not_proving_ant
     assert r["status"] == "accepted", r["reason"]
     s = r["scoring"]
     assert s["status"] == "refused" and "description size" in s["reason"], s
-    assert s["description_size"] >= 12 * len(nums)
+    assert s["description_size"] >= 24 * len(nums)
 
 
 def test_option_overrides_in_the_candidate_do_not_reach_the_service(work, tmp_path):
@@ -450,13 +458,14 @@ def test_renaming_or_hiding_a_definition_does_not_hide_its_data(work, tmp_path):
         assert r["status"] == "accepted", (name, r["reason"])
         s = r["scoring"]
         assert s["status"] == "refused" and "description size" in s["reason"], (name, s)
-        assert s["description_size"] >= 12 * len(nums)
+        assert s["description_size"] >= copy_bound(nums)
 
 
 def test_a_table_of_booleans_or_a_church_encoding_is_refused_scoring_not_proving_anti_hiding(work, tmp_path):
     """A copy of the weights as a list of booleans (one constructor per bit) and as a Church encoding (one
     function per number applying `c0` or `c1` per bit, no numeral anywhere): the description size counts
-    every node, so both weigh more than the weights as numerals, and both are refused."""
+    every node, so both weigh at least two per bit, more than the weights as numerals, and both are
+    refused."""
     sys.path.insert(0, str(HERE))
     import accept
     sys.path.pop(0)
@@ -481,27 +490,121 @@ def test_a_table_of_booleans_or_a_church_encoding_is_refused_scoring_not_proving
         assert r["status"] == "accepted", (name, r["reason"])
         s = r["scoring"]
         assert s["status"] == "refused" and "description size" in s["reason"], (name, s)
-        assert s["description_size"] >= 12 * len(nums), (name, s["description_size"])
+        assert s["description_size"] >= 2 * 24 * len(nums), (name, s["description_size"])
 
 
 def test_branching_into_the_checkers_own_code_is_not_expressible(work, tmp_path):
-    """The reviewer's continuation counterexample `I.ifN bit (k 1) (k 0)`: with version 3 of the interface
-    there is no `ifN` (nor `ifB`, `ifV`, `ifU`), so the checker does not compile; the only uses of a truth
-    value are countB, nmask, selectV and the charged gates, none of which runs the checker's own code."""
+    """The reviewers' counterexamples to versions 2 and 3, as written: the continuation `I.ifN bit (k 1)
+    (k 0)` and the masked conditional `nadd (nmask b (k 1)) (nmask nb (k 0))`. Neither `ifN` nor `nmask`
+    exists in version 4, so neither checker compiles; the only uses of a truth value are countB, nscale,
+    selectV and the charged gates, none of which runs the checker's own code or conditions a count."""
     src = SCORED_SOURCE.replace("    pure (I.nadd (I.countB ok) n)",
                                 "    I.ifN ok (pure (I.nadd (I.nofNat 1) n)) (pure (I.nadd (I.nofNat 0) n))")
     assert src != SCORED_SOURCE
     r = submit(scored_variant(tmp_path, "continuation", src), work)
     assert r["status"] == "rejected" and "does not compile" in r["reason"] and "ifN" in r["reason"], r["reason"]
+    src = SCORED_SOURCE.replace("    pure (I.nadd (I.countB ok) n)",
+                                "    let nok ← I.bnot \"m\" ok\n    pure (I.nadd (I.nmask ok (I.nofNat 1)) (I.nmask nok n))")
+    assert src != SCORED_SOURCE
+    r = submit(scored_variant(tmp_path, "masked-conditional", src), work)
+    assert r["status"] == "rejected" and "does not compile" in r["reason"] and "nmask" in r["reason"], r["reason"]
 
 
-def test_the_ported_column_proof_is_scored_under_language_v3(work):
-    """The agent's column proof ported by hand to version 3 (examples/open_lane/max2_tiny_cols23_v3): the
-    interface keeps a meaningful method expressible, provable and scoreable. 23 of 64, bill 549 (the
-    agent's 458 plus the charged gates), length 629; its description size calibrates the default budget."""
+def test_a_decision_tree_over_truth_values_bills_every_node(work):
+    """The version 3 reviewer's decoder written in version 4 (examples/open_lane/max2_tiny_decision_tree):
+    the path indicator passes a charged gate at every node, so a tree over k = 4 truth values of one weight
+    bills 3 (2^4 - 1) = 45 gates on top of the 4 numerals and 4 comparisons that made the truth values,
+    whatever its leaves compute (here nothing: count 0). This is the accounting the free mask broke."""
+    r = submit(TREE, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 0, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 53 == 2 * 4 + 3 * (2 ** 4 - 1) and s["length"] == 53 + 80
+
+
+def test_the_ported_column_proof_is_scored_under_language_v4(work):
+    """The agent's column proof ported by hand to version 4 (examples/open_lane/max2_tiny_cols23_v3): the
+    interface keeps a meaningful method expressible, provable and scoreable. 23 of 64, bill 562 (the
+    agent's 458 plus 104 charged gates), length 642; its description size calibrates the default budget."""
     r = submit(PORT, work)
     assert r["status"] == "accepted" and r["certified_count"] == 23, r["reason"]
     s = r["scoring"]
     assert s["status"] == "scored", s["reason"]
-    assert s["bill"] == 549 and s["length"] == 629 and s["description_size"] <= s["size_budget"]
+    assert s["bill"] == 562 and s["length"] == 642 and s["description_size"] <= s["size_budget"]
     assert r["score_eligible"] is True
+
+
+def test_the_default_size_budget_is_below_a_copy_of_the_weights_on_every_zoo_setting():
+    """The policy's arithmetic, with no Lean: for one network of every size setting of every model in the
+    pipeline's zoo, the bits of its weights as the exporter writes them (integers over the tensor's common
+    power-of-two exponent: the least any encoding measures, one unit per bit) exceed 8192 + 4 E. The tiny
+    test network (E = 80) is the exception the other size tests work around with SMALL_BUDGET."""
+    sys.path.insert(0, str(HERE))
+    import accept
+    sys.path.pop(0)
+    from fractions import Fraction
+    import numpy as np
+    seen = []
+    for manifest in sorted((REPO / "models").glob("*/zoo/manifest.json")):
+        m = json.loads(manifest.read_text())
+        settings = set()
+        for n in m["networks"]:
+            if n["setting"] in settings:
+                continue
+            settings.add(n["setting"])
+            z = np.load(manifest.parent / n["weights"])
+            bits = E = 0
+            for key in z:
+                arr = np.asarray(z[key])
+                if arr.dtype.kind != "f":
+                    continue
+                fr = [Fraction(float(v)) for v in arr.reshape(-1).astype(np.float64)]
+                den = max([f.denominator for f in fr] + [1])
+                ints = [int(f * den) for f in fr]
+                bits += copy_bound(ints)
+                E += len(ints)
+            budget = accept.SIZE_BUDGET_BASE + accept.SIZE_BUDGET_PER_PARAM * E
+            seen.append((manifest.parent.parent.name, n["setting"], E, bits, budget))
+            assert bits > budget, (manifest.parent.parent.name, n["setting"], E, bits, budget)
+    assert len(seen) >= 6, seen
+
+
+def test_a_copy_of_the_weights_is_refused_under_the_default_policy_on_a_real_network(work, tmp_path):
+    """max2 v64 (E = 1,088, 23 to 35 bits per weight): a numeral copy of the weights in the general layer
+    measures above the default budget 8192 + 4 E = 12,544 and is refused scoring, with no test hook. The
+    checker certifies nothing (count 0, so the kernel work is small); the proof stays verified."""
+    sys.path.insert(0, str(HERE))
+    import accept
+    sys.path.pop(0)
+    accept._repo = REPO
+    net = json.loads(accept.export_network(REPO, "models/max2", "max2-v64-s0", work).read_text())
+    nums = [abs(v) for w in net["weights"] for v in w["ints"]]
+    assert len(nums) == 1088
+    src = "\n".join([
+        "import Protected.N_max2_v64_s0_c0", "import CompactCheck.Soundness", "import CompactCheck.CountedOps", "",
+        "namespace Candidate.Max2V64Copy", "open CompactCheck Protected.N_max2_v64_s0_c0", "",
+        "def table : List Nat := [" + ", ".join(str(v) for v in nums) + "]", "",
+        "def D : Checker := fun I => pure (I.nofNat (table.length - table.length))", "",
+        "theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),",
+        "    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by",
+        "  intro w c n cost h",
+        "  have h' : (pure (table.length - table.length) : CostM Nat).run ⟨w, c⟩ [] = some (n, cost) := h",
+        "  rw [CostM.run_pure] at h'",
+        "  simp only [Option.some.injEq, Prod.mk.injEq, Nat.sub_self] at h'",
+        "  rw [← h'.1]", "  exact Nat.zero_le _", "",
+        "theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 0) := by",
+        "  decide +kernel", "",
+        "theorem performance : Target := by",
+        "  show claimedCount ≤ numCorrect graph weights task", "  exact Nat.zero_le _", "",
+        "end Candidate.Max2V64Copy", ""])
+    manifest = {"model": "models/max2", "network": "max2-v64-s0", "claimed_count": 0,
+                "theorem": "Candidate.Max2V64Copy.performance", "modules": ["Candidate/Max2V64Copy.lean"],
+                "scored": {"checker": "Candidate.Max2V64Copy.D", "sound": "Candidate.Max2V64Copy.D_sound",
+                           "instance": "Candidate.Max2V64Copy.D_instance", "certificate": [], "claimed_bill": 0}}
+    d = variant(tmp_path, "v64-copy", lean=src, manifest=manifest, module_path="Candidate/Max2V64Copy.lean", base=SCORED)
+    (d / "Candidate" / "Max2TinyScored.lean").unlink()
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 0, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "description size" in s["reason"], s
+    assert s["size_budget"] == 8192 + 4 * 1088 and s["description_size"] >= copy_bound(nums) > s["size_budget"], s

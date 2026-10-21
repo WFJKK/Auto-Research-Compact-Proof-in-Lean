@@ -249,20 +249,22 @@ partial def dependencyClosure (cs : Std.HashMap Name ConstantInfo) (roots : List
   return visited
 
 /-- The description size of an expression: every node counts 1 (an application, a binder, a constant, a
-    variable), a natural number literal 1 per 2 bits, a string literal 1 per byte, so that a number of the
-    network costs about 15 however it is written (a numeral, a list of booleans, a Church numeral) and a
-    copy of the weights costs at least about 12 E; a numeral `OfNat.ofNat _ n _` counted once. A table can live in literals, in constructors, or in
+    variable), a natural number literal 1 per bit, a string literal 8 per byte (1 per bit), so that a
+    number of `b` bits costs at least `b` however it is written (a numeral or a string: `b`; a list of
+    booleans or a Church numeral: at least `2 b`, one node per bit and one per constructor or application);
+    a numeral `OfNat.ofNat _ n _` is counted once. A table can live in literals, in constructors, or in
     the shape of applications alone (`fun c0 c1 z => c0 (c1 (c0 z))` carries bits), so the whole term is
-    measured. This bounds the description length of the general layer's data; it does not show the
-    absence of compressed information. -/
+    measured, as a DAG: a subterm that occurs twice is counted once, which is still a description of that
+    length. This bounds the description length of the general layer's data; it does not show the absence
+    of compressed information. -/
 partial def descSize (e : Expr) : Nat :=
   go e |>.run' {}
 where
   go (e : Expr) : StateM (Std.HashMap Expr Nat) Nat := do
     if let some n := (← get).get? e then return n
     let n ← match e with
-      | .lit (.natVal n) => pure (max 1 ((Nat.log2 n + 2) / 2))
-      | .lit (.strVal s) => pure (max 1 s.utf8ByteSize)
+      | .lit (.natVal n) => pure (max 1 (Nat.log2 n + 1))
+      | .lit (.strVal s) => pure (max 1 (8 * s.utf8ByteSize))
       | .app .. =>
         let f := e.getAppFn
         let args := e.getAppArgs

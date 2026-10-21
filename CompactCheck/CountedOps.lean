@@ -6,13 +6,21 @@ import CompactCheck.CountedCheck
 A scored checker is a function of an interpreter `I : Interp`: abstract numbers `I.V`, abstract booleans
 `I.B`, abstract counts `I.N`, in an abstract monad `I.M`, with every operation on a number or a truth
 value charged by the interpreter. There is no branching on a truth value: it can only become a count, a
-mask on a count, a choice between two numbers, or another truth value through a charged gate. Because the
-checker has to make sense for every `I`, and no operation hands a value of `I.V`, `I.B` or `I.N` back to
-its own Lean code in a form it can inspect, nothing the checker learns about the network can change what
-its own code does next: whatever it learns stays in the interpreter's hands, and the bill the interpreter
-keeps is the whole cost of the computation. This closes the holes of the two earlier versions (concrete
-booleans, then branching into the checker's own code: a reviewer's counterexample `I.ifN bit (k 1) (k 0)`
-let a bit reach `k` as a plain `Nat`).
+choice between two numbers, or another truth value through a charged gate. Because the checker has to
+make sense for every `I`, and no operation hands a value of `I.V`, `I.B` or `I.N` back to its own Lean
+code in a form it can inspect, nothing the checker learns about the network can change what its own code
+does next: whatever it learns stays in the interpreter's hands, and the bill the interpreter keeps is the
+whole cost of the computation.
+
+Counts are terminal. The operations that make a count are `nzero`, `nsucc`, `nadd`, `nofNat` (concrete
+numbers, free), `countB` and `nscale` (a concrete multiple of one truth value, free); no operation takes a
+count together with a truth value or a number, and none takes a count and returns anything but a count.
+So every count a checker builds is a sum of concrete numbers and concrete multiples of truth values that
+charged operations produced, and the size of a count never encodes a computation on the network: a
+product of two truth values exists only through a charged gate. This closes the holes of the three earlier
+versions: concrete booleans (bits rebuilt into numbers by free arithmetic), branching into the checker's
+own code (a reviewer's `I.ifN bit (k 1) (k 0)`), and a free mask `nmask : B → N → N` on an arbitrary count
+(a reviewer's decision tree `nadd (nmask b (k 1)) (nmask nb (k 0))`, a conditional on counts for nothing).
 
 `Interp.counting` is the interpreter the service runs: `CostM` of `Counted.lean`, with `Q`, `Bool` and `Nat`.
 A submission's soundness theorem and instance theorem are about `D Interp.counting` (docs/COUNTED.md); the
@@ -141,12 +149,14 @@ structure Interp : Type 1 where
   /-- The two constant truth values, free. -/
   btrue : B
   bfalse : B
-  /-- What a truth value can become, and nothing else: a count (`countB`: one if true), a mask on a count
-      (`nmask`: the count if true, else zero), a choice between two numbers (`selectV`, charged 1 like
-      `min`), or another truth value through a gate (charged 1 each). There is no branching: a checker's
-      own code never learns a truth value, so what it computes next never depends on the network. -/
+  /-- What a truth value can become, and nothing else: a count (`countB`: one if true; `nscale k`: the
+      concrete `k` if true, else zero), a choice between two numbers (`selectV`, charged 1 like `min`), or
+      another truth value through a gate (charged 1 each). There is no branching: a checker's own code
+      never learns a truth value, so what it computes next never depends on the network; and no operation
+      takes a count together with a truth value, so a count is only ever a sum of concrete multiples of
+      truth values (see the header). -/
   countB : B → N
-  nmask : B → N → N
+  nscale : Nat → B → N
   selectV : String → B → V → V → M V
   bnot : String → B → M B
   band : String → B → B → M B
@@ -193,7 +203,7 @@ abbrev Checker := (I : Interp) → I.M I.N
   btrue := true
   bfalse := false
   countB := fun b => cond b 1 0
-  nmask := fun b n => cond b n 0
+  nscale := fun k b => cond b k 0
   selectV := fun cat b x y => ⟨fun _ c => some (cond b x y, c.add cat 1)⟩
   bnot := fun cat b => ⟨fun _ c => some (!b, c.add cat 1)⟩
   band := fun cat a b => ⟨fun _ c => some (a && b, c.add cat 1)⟩
@@ -233,7 +243,7 @@ namespace Interp
 @[simp] theorem counting_btrue : counting.btrue = true := rfl
 @[simp] theorem counting_bfalse : counting.bfalse = false := rfl
 @[simp] theorem counting_countB (b : counting.B) : counting.countB b = cond b 1 0 := rfl
-@[simp] theorem counting_nmask (b : counting.B) (n : counting.N) : counting.nmask b n = cond b n 0 := rfl
+@[simp] theorem counting_nscale (k : Nat) (b : counting.B) : counting.nscale k b = cond b k 0 := rfl
 theorem counting_selectV_run (cat : String) (b : Bool) (x y : Q) (env : Env) (c : Cost) :
     (counting.selectV cat b x y).run env c = some (cond b x y, c.add cat 1) := rfl
 theorem counting_bnot_run (cat : String) (b : Bool) (env : Env) (c : Cost) :
