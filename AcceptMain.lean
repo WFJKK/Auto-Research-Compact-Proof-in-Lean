@@ -254,9 +254,9 @@ partial def dependencyClosure (cs : Std.HashMap Name ConstantInfo) (roots : List
     booleans or a Church numeral: at least `2 b`, one node per bit and one per constructor or application);
     a numeral `OfNat.ofNat _ n _` is counted once. A table can live in literals, in constructors, or in
     the shape of applications alone (`fun c0 c1 z => c0 (c1 (c0 z))` carries bits), so the whole term is
-    measured, as a DAG: a subterm that occurs twice is counted once, which is still a description of that
-    length. This bounds the description length of the general layer's data; it does not show the absence
-    of compressed information. -/
+    measured, as a tree: a subterm that occurs twice counts twice (the cache below only saves recomputing
+    it), which is at least the length of any description of it. This bounds the description length of the
+    general layer's data; it does not show the absence of compressed information. -/
 partial def descSize (e : Expr) : Nat :=
   go e |>.run' {}
 where

@@ -608,3 +608,18 @@ def test_a_copy_of_the_weights_is_refused_under_the_default_policy_on_a_real_net
     s = r["scoring"]
     assert s["status"] == "refused" and "description size" in s["reason"], s
     assert s["size_budget"] == 8192 + 4 * 1088 and s["description_size"] >= copy_bound(nums) > s["size_budget"], s
+
+
+def test_the_service_reports_the_identity_its_receipts_carry(work):
+    """`accept.py identity` is what a run records when it starts and checks when it resumes: the project's
+    commit, the toolchain, trusted-source and policy digests every receipt carries, and the binary."""
+    r = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "identity"], capture_output=True, text=True, timeout=600)
+    ident = json.loads(r.stdout)
+    assert set(ident) == {"commit", "dirty", "toolchain", "lean_project", "policy", "acceptcheck"}
+    receipt = submit(SCORED, work)
+    assert receipt["status"] == "accepted"
+    for k in ("toolchain", "lean_project", "policy"):
+        assert receipt["digests"][k] == ident[k], k
+    with_hook = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "identity"], capture_output=True, text=True,
+                               timeout=600, env={**os.environ, **SMALL_BUDGET})
+    assert json.loads(with_hook.stdout)["policy"] != ident["policy"]  # the hooks are part of the policy

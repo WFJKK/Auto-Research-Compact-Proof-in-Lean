@@ -149,7 +149,7 @@ check, the service enforces, as policy (recorded in the receipt's policy digest)
 - a description-size budget: the size of the checker's computational closure (the checker and the
   definitions it uses, transitively through definitions and never through theorems: what it computes is
   a function of these bodies and of the interpreter), every node of every body counted 1, a numeral 1 per
-  bit, a string 8 per byte, measured as a DAG, with no exemption by name, is at most `8192 + 4 E`. A
+  bit, a string 8 per byte, measured as a tree (a repeated subterm counts each time), with no exemption by name, is at most `8192 + 4 E`. A
   reviewer showed that data can live in constructors (`[true, false, ...]`) and in the shape of
   applications alone (`fun c0 c1 z => c0 (c1 (c0 z))`), so the whole term is measured, and the rates make
   a number of `b` bits cost at least `b` however it is written (a numeral or a string `b`, constructors

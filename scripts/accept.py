@@ -53,6 +53,11 @@ and `execution_assurance` say what a result is: a scored result's count and bill
 
 builds and checks a protected module alone (for tests, and for a candidate's own development).
 
+    python3 scripts/accept.py identity
+
+prints what the service is (the project's commit, the digests every receipt carries: toolchain, trusted
+sources, policy; the acceptcheck binary), for a run to record when it starts and check when it resumes.
+
     python3 scripts/accept.py compile <workspace> Candidate/<Name>.lean --repo R --work W --model M --network N
                               --claimed C [--certificate c.json]
 
@@ -649,6 +654,26 @@ def compile_for_development(ws: Path, rel: str, repo: Path, model: str, network:
             "protected_module": prot["module"], "messages": text, "seconds": round(res["seconds"], 1)}
 
 
+def identity() -> dict:
+    """What the service is, for a run to record when it starts and to check when it resumes: the Lean
+    project's commit and whether tracked files are modified, the digests every receipt carries (the
+    toolchain, the project's trusted sources, the policy as it is in force, environment hooks included) and
+    the acceptcheck binary. A receipt whose digests differ from the identity a run recorded was made by a
+    different service."""
+    lean = lean_binary()
+    try:
+        head = subprocess.run(["git", "-C", str(LEAN_PROJECT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              timeout=60).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "-C", str(LEAN_PROJECT), "status", "--porcelain", "--untracked-files=no"],
+                                    capture_output=True, text=True, timeout=60).stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        head, dirty = None, True
+    return {"commit": head, "dirty": dirty,
+            "toolchain": (toolchain_root(lean) / "bin" / "lean").name + ":" + sha256_file(lean)[:16],
+            "lean_project": project_digest(), "policy": policy_digest(),
+            "acceptcheck": sha256_file(acceptcheck_binary())[:16]}
+
+
 def project_digest() -> str:
     """A digest of the Lean project's source: the trusted base of every receipt."""
     h = hashlib.sha256()
@@ -686,7 +711,11 @@ def main(argv=None) -> int:
     p.add_argument("--work", type=Path, required=True)
     p.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
     p.add_argument("--certificate", type=Path, help="a JSON list of numbers, for a scored submission's module")
+    sub.add_parser("identity", help="the service's identity: commit, toolchain, project, policy and binary digests")
     args = ap.parse_args(argv)
+    if args.cmd == "identity":
+        print(json.dumps(identity(), indent=1))
+        return 0
     global _repo
     _repo = args.repo.resolve()
     if args.cmd == "submit":
