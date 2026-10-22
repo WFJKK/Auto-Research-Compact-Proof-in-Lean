@@ -627,8 +627,9 @@ def test_the_service_reports_the_identity_its_receipts_carry(work):
 
 
 PILOT2 = PROJECT / "examples" / "open_lane" / "pilot2_max2_tiny"
-PILOT2_EXPECTED = {  # from the receipts the Mac's service wrote on 22 October 2026 (receipt-mac-2026-10-22.json)
-    "r1_ColFull": (64, "refused", None, None),
+PILOT2_EXPECTED = {  # from the receipts the Mac's service wrote on 22 October 2026 (receipt-mac-2026-10-22.json),
+    # under policy v3; under policy v4 (the audited match-compiler constants allowed) ColFull is scored
+    "r1_ColFull": (64, "scored", 943, 1023),
     "r1_ColFull2": (64, "scored", 951, 1031),
     "r1_Col21": (21, "scored", 455, 535),
     "r2_Six": (6, "scored", 189, 269),
@@ -650,6 +651,108 @@ def test_the_pilot_2_proofs_reproduce_their_receipts(work, name):
     assert s["status"] == status, (name, s)
     assert s.get("bill") == bill and s.get("length") == length, (name, s)
     recorded = json.loads((PILOT2 / name / "receipt-mac-2026-10-22.json").read_text())["scoring"]
-    assert s.get("description_size") == recorded.get("description_size"), (name, s, recorded)
-    if status == "refused":
-        assert "Eq.ndrec_symm" in s["reason"]
+    if recorded.get("description_size") is not None:
+        assert s.get("description_size") == recorded.get("description_size"), (name, s, recorded)
+    else:
+        assert recorded["status"] == "refused" and "Eq.ndrec_symm" in recorded["reason"]  # policy v3's refusal, kept as the record
+
+
+MATCH_HELPERS = """inductive Term where
+  | pair (a b : Nat)
+  | single (a : Nat)
+
+/-- A match on numeral patterns and a two-list recursion with a wildcard: Lean's match compiler injects
+    constants for both. -/
+def dropPair : List Term → List Term
+  | [] => []
+  | t :: ts => (match t with | .pair 6 7 => [] | _ => [t]) ++ dropPair ts
+
+def zipAdd : List Nat → List Nat → List Nat
+  | a :: as, b :: bs => (a + b) :: zipAdd as bs
+  | _, _ => []
+
+def termInputs : List Term → List Input
+  | [] => []
+  | .pair a b :: ts => [a, b] :: termInputs ts
+  | .single a :: ts => [a, a] :: termInputs ts
+
+"""
+
+
+def test_the_match_compilers_constants_are_allowed(work, tmp_path):
+    """Pilot 2's first proof was refused scoring for `Eq.ndrec_symm`, injected by a `match` on numeral
+    patterns; a wildcard in a two-list recursion injects `Nat.ne_of_beq_eq_false`. Both are audited and on
+    the allowlist (cost-v4): a checker whose plan goes through such helpers is scored."""
+    inputs = "termInputs (dropPair [.pair 6 7, .pair 0 1, .single 2]) ++ (zipAdd [1, 2] [2, 3]).map (fun a => [a, a])"
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                MATCH_HELPERS + "/-- The checker: a plan through the helpers. -/\ndef D : Checker := fun I => countSingles I graph task (" + inputs + ")")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  have h' := countSingles_le ⟨w, c⟩ _ [] n cost h\n"
+                      "  refine le_trans h' (List.Subperm.countP_le _ (List.subperm_of_subset ?_ ?_))\n  · decide +kernel\n  · intro x hx; revert x; decide +kernel")
+    src = src.replace("theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (64, 64 * 63) := by",
+                      "theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (4, 4 * 63) := by")
+    src = src.replace("  exact D_sound weights cert 64 cost h", "  exact D_sound weights cert 4 cost h")
+    src = src.replace("N_max2_tiny_v8_s0_c64", "N_max2_tiny_v8_s0_c4")
+    manifest = json.loads((SCORED / "manifest.json").read_text())
+    manifest["claimed_count"] = 4
+    manifest["scored"]["claimed_bill"] = 4 * 63
+    r = submit(variant(tmp_path, "match-constants", lean=src, manifest=manifest, module_path="Candidate/Max2TinyScored.lean", base=SCORED), work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s
+    assert s["bill"] == 4 * 63
+
+
+def test_a_checker_may_build_a_graph_of_the_linear_family_and_run_single_on_it(work, tmp_path):
+    """Policy v4: `Graph.mk` and the linear family's `Op` constructors are allowed, so a checker can call
+    `single` on a graph of its own over the same weight names (a cheaper well-formedness guard than the
+    protected graph's forward pass, as pilot 2's agent proposed). `single` prices any graph at its
+    forward-pass cost; the soundness statement stays about the protected graph. Here the checker's graph
+    equals the protected one, so the bill is the brute-force bill and the proof goes through the equality."""
+    helpers = ("def myGraph : Graph := { positions := 2, values := 8, nodes := [.input, .sum 0 1, "
+               ".linear 1 \"embedding.weight\" none, .linear 2 \"linear.weight\" none, .linear 3 \"unembedding.weight\" none], "
+               "output := 4 }\n\ntheorem myGraph_eq : myGraph = graph := rfl\n\n")
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                helpers + "/-- The checker: brute force through the checker's own graph. -/\n"
+                                "def D : Checker := fun I => countSingles I myGraph task (allInputs task.space)")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  simp only [D, myGraph_eq] at h\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h")
+    r = submit(scored_variant(tmp_path, "own-graph", src), work)
+    assert r["status"] == "accepted" and r["certified_count"] == 64, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s
+    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v4"
+
+
+def test_weight_sizes_are_read_for_free(work, tmp_path):
+    """Policy v4: `I.weightSize` gives a tensor's data length, free like `weightShape`, so a checker
+    establishes well-formedness (length equals the product of the shape) by a concrete comparison instead
+    of a forward pass. Here the brute force runs only if the three weights are well formed; the bill is
+    unchanged, the reads cost nothing, and `CostM.weightSize_spec` is what a soundness proof uses."""
+    helpers = ("def wellFormed (I : Interp) (name : String) : I.M Bool := do\n"
+               "  let sh ← I.weightShape name\n  let n ← I.weightSize name\n  pure (sh.foldl (· * ·) 1 == n)\n\n")
+    src = SCORED_SOURCE.replace("/-- The checker: every input of the task's space. -/\n" + NEW_D,
+                                helpers + "/-- The checker: brute force, after a free well-formedness check. -/\n"
+                                "def D : Checker := fun I => do\n  let a ← wellFormed I \"embedding.weight\"\n"
+                                "  let b ← wellFormed I \"linear.weight\"\n  let c ← wellFormed I \"unembedding.weight\"\n"
+                                "  if a && b && c then countSingles I graph task (allInputs task.space) else pure I.nzero")
+    src = src.replace("  intro w c n cost h\n  unfold numCorrect\n  exact countSingles_le ⟨w, c⟩ (allInputs task.space) [] n cost h",
+                      "  intro w c n cost h\n  unfold numCorrect\n  have h' : (D Interp.counting).run ⟨w, c⟩ [] = some (n, cost) := h\n"
+                      "  simp only [D] at h'\n  obtain ⟨a, c1, -, h'⟩ := bind_some h'\n  obtain ⟨b, c2, -, h'⟩ := bind_some h'\n"
+                      "  obtain ⟨c3, c4, -, h'⟩ := bind_some h'\n  split at h'\n"
+                      "  · exact countSingles_le ⟨w, c⟩ (allInputs task.space) c4 n cost h'\n"
+                      "  · rw [CostM.run_pure] at h'\n    simp only [Option.some.injEq, Prod.mk.injEq] at h'\n    rw [← h'.1]\n    exact Nat.zero_le _")
+    src = src.replace("theorem D_sound :", """theorem bind_some {α β : Type} {x : CostM α} {f : α → CostM β} {env : Env} {c c' : Cost} {b : β}
+    (h : (x >>= f).run env c = some (b, c')) :
+    ∃ a c1, x.run env c = some (a, c1) ∧ (f a).run env c1 = some (b, c') := by
+  rw [CostM.run_bind] at h
+  split at h
+  · rename_i a c1 ha; exact ⟨a, c1, ha, h⟩
+  · cases h
+
+theorem D_sound :""")
+    r = submit(scored_variant(tmp_path, "weight-sizes", src), work)
+    assert r["status"] == "accepted" and r["certified_count"] == 64, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s
+    assert s["bill"] == 64 * 63

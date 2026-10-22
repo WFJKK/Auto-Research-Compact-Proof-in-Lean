@@ -85,7 +85,12 @@ RECEIPT_SCHEMA = "open-lane-receipt-v1"
 ALLOWED_AXIOMS = {"propext", "Classical.choice", "Quot.sound"}
 TRUSTED_PREFIXES = ("CompactCheck.", "Mathlib.")
 KINDS = ("performance", "auxiliary")  # a proof of Target, or a lemma: accepted with no count and no score
-COST_MODEL = "cost-v3"
+COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of the pipeline): unchanged since the open lane began
+# the open lane's policy around those prices, versioned: what a checker may use for free and the budgets.
+# v4 (22 October 2026, after pilot 2 and review round 7): a free weightSize read, graph constructors of the
+# linear family and two audited match-compiler constants on the allowlist. v3 (21 October): language
+# version 4 and the description-size budget. Recorded in every receipt and in the policy digest.
+POLICY_VERSION = "open-lane-policy-v4"
 ASSURANCE = "kernel_checked_instance"  # a scored result's count and bill are both kernel-checked, never executed
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")
@@ -451,7 +456,7 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
     receipt = {"schema": RECEIPT_SCHEMA, "candidate_id": None, "status": None, "reason": None,
                "claim_kind": None, "certified_count": None, "domain_size": None, "claimed_count": None, "network": None,
                "theorem": None, "statement": None, "axioms": None, "isolation": None, "steps": [], "digests": {},
-               "score_eligible": False, "execution_assurance": None, "cost_model": COST_MODEL,
+               "score_eligible": False, "execution_assurance": None, "cost_model": COST_MODEL, "policy_version": POLICY_VERSION,
                "scoring": {"status": "not_requested"},
                "seconds": None, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     ws = None
@@ -608,7 +613,7 @@ def policy_digest() -> str:
     """A digest of the scoring policy: the allowlist and the budgets."""
     h = hashlib.sha256()
     h.update(ALLOWLIST.read_bytes() if ALLOWLIST.exists() else b"")
-    h.update(json.dumps({"size_budget": [SIZE_BUDGET_BASE, SIZE_BUDGET_PER_PARAM],
+    h.update(json.dumps({"policy_version": POLICY_VERSION, "size_budget": [SIZE_BUDGET_BASE, SIZE_BUDGET_PER_PARAM],
                          "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS,
                          "allowed_axioms": sorted(ALLOWED_AXIOMS), "trusted_prefixes": TRUSTED_PREFIXES}).encode())
     return h.hexdigest()[:16]

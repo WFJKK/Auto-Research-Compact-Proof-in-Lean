@@ -14,6 +14,7 @@ CompactCheck.Interp.B
 CompactCheck.Interp.N
 CompactCheck.Interp.weight
 CompactCheck.Interp.weightShape
+CompactCheck.Interp.weightSize
 CompactCheck.Interp.cert
 CompactCheck.Interp.certSize
 CompactCheck.Interp.lit
@@ -376,6 +377,31 @@ CompactCheck.Task.label
 CompactCheck.Graph
 CompactCheck.Graph.positions
 CompactCheck.Graph.values
+CompactCheck.Graph.nodes
+CompactCheck.Graph.output
+
+# cost-v4 (22 October 2026, after pilot 2 and review round 7): a checker may build a graph of the linear
+# family and call `single` on it (a small graph over the same weight names is a cheaper source of
+# well-formedness than the protected graph's forward pass); `single` prices any graph at its forward-pass
+# cost, and the soundness statement stays about the protected graph. Constructors of the linear family only.
+CompactCheck.Graph.mk
+CompactCheck.Op
+CompactCheck.Op.input
+CompactCheck.Op.sum
+CompactCheck.Op.linear
+CompactCheck.Op.add
+# `Op.sum` takes its dimension as an Int: the type and its literals (instOfNat is listed above)
+Int
+Int.ofNat
+Int.negSucc
+
+# cost-v4: two constants Lean's match compiler injects, audited (22 October 2026). `Eq.ndrec_symm` is the
+# transport along an equation that a `match` on numeral patterns produces; in a checker every equation it
+# can transport along is between concrete values (no operation of the interface yields an equation between
+# abstract ones), so it moves concrete data only. `Nat.ne_of_beq_eq_false` is a theorem (a proof, which
+# computes nothing) that a wildcard in a recursion over two lists produces.
+Eq.ndrec_symm
+Nat.ne_of_beq_eq_false
 
 # structural recursion
 PProd

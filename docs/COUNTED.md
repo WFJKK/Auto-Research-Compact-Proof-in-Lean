@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 4, 21 October)
+# The counted language (step 2 of the open lane; version 4 of the language, policy v4, 22 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -18,7 +18,7 @@ A checker is a function of an interpreter:
     abbrev Checker := (I : Interp) → I.M I.N
 
 `Interp` (CountedOps.lean) is a structure of abstract types and operations: a monad `M`, numbers `V`,
-truth values `B`, counts `N`; `weight`, `cert`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
+truth values `B`, counts `N`; `weight`, `weightShape`, `weightSize`, `cert`, `certSize`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
 `max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nscale`, `selectV`,
 `bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
 `single` and `interval`. The checker's own code is ordinary Lean on lists, `Nat` indices and strings
@@ -43,7 +43,11 @@ charged gate. The full list of signatures is the structure itself (CountedOps.le
 `V` is `Q` (a structure around `ℚ`), `B` is `Bool`, `N` is `Nat`. Its charges are `cost-v3`'s:
 
 - `add`, `sub`, `muladd`, `neg`, `min`, `max`: 1 each; `lt`, `le`, `eq`: 1 each;
-- `weight name i`: free (the weights are charged once per proof, as `extract`, E);
+- `weight name i`: free (the weights are charged once per proof, as `extract`, E); `weightShape` and
+  `weightSize` (a tensor's shape and data length): free, structural metadata, not numbers of the network.
+  With them a checker establishes that the weights are well formed (length equals the product of the
+  shape) by a concrete comparison; before policy v4 (22 October) the only way was a whole forward pass
+  through `single`, 63 operations on the tiny network, which every one of pilot 2's proofs paid once;
 - `cert i`: free (the certificate is charged once per proof, as `read`, 1 per number);
 - `lit n` for a numeral: 1 (as a number read from the proof file);
 - `exp`: the exponential's enclosure (`Exp.lean`), charged 3, as `cost-v3` charges a softmax entry;
@@ -92,6 +96,17 @@ checker's own structural types (inputs, boxes, the task's shape). The protected 
 
 Why this is enough: the abstraction does the work (above); the allowlist makes sure the checker does not
 reach the counting interpreter or a classical decision by name, which are the only ways around it.
+
+Policy v4 (22 October 2026, after pilot 2 and the reviewer's round 7) added three things to the allowlist,
+each with a regression test in `scripts/test_accept.py`: `Graph.mk` and the `Op` constructors of the
+linear family (`input`, `sum`, `linear`, `add`), so a checker may build a graph over the same weight
+names and call `single` on it, which `single` prices at that graph's forward-pass cost while the soundness
+statement stays about the protected graph; and two constants Lean's `match` compiler injects,
+`Eq.ndrec_symm` (a transport along an equation, produced by numeral patterns; a checker can only transport
+along equations between concrete values, since no operation yields an equation between abstract ones) and
+`Nat.ne_of_beq_eq_false` (a theorem, produced by a wildcard in a recursion over two lists). The pilot's
+first proof had been refused for the former. The policy's version is in every receipt (`policy_version`)
+and in the policy digest; the prices themselves (`cost-v3`) are unchanged.
 
 ## The two statements (`acceptcheck score`)
 

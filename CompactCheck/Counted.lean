@@ -101,6 +101,25 @@ def weightShape (name : String) : CostM (List Nat) := ⟨fun env c =>
   | some t => some (t.shape, c)
   | none => none⟩
 
+/-- The number of entries of the weight `name` (its data length, which may differ from the product of its
+    shape in an ill-formed network file). Free, like `weightShape`: structural metadata, not a number of
+    the network. Before version 4.1 (cost-v4) a checker could bound a tensor's length from above only by
+    running a whole forward pass (`single`), which every proof paid once. -/
+def weightSize (name : String) : CostM Nat := ⟨fun env c =>
+  match List.lookup name env.weights with
+  | some t => some (t.data.size, c)
+  | none => none⟩
+
+theorem weightSize_spec {name : String} {env : Env} {c c' : Cost} {n : Nat}
+    (h : (weightSize name).run env c = some (n, c')) :
+    ∃ t, List.lookup name env.weights = some t ∧ t.data.size = n ∧ c' = c := by
+  simp only [weightSize] at h
+  split at h
+  · rename_i t ht
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
+    exact ⟨t, ht, h.1, h.2.symm⟩
+  · cases h
+
 /-- Number `i` of the certificate. Free: the certificate is charged once per proof (`read`). -/
 def cert (i : Nat) : CostM Q := ⟨fun env c =>
   if i < env.cert.size then some (⟨env.cert[i]!⟩, c) else none⟩

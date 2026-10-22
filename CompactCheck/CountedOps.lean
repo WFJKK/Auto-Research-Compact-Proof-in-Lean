@@ -121,6 +121,10 @@ structure Interp : Type 1 where
   weight : String → Nat → M V
   /-- The shape of a weight, for loops. Free. -/
   weightShape : String → M (List Nat)
+  /-- The number of entries of a weight (its data length). Free: structural metadata, like the shape. With
+      it a checker establishes that a tensor is well formed (length equals the product of the shape) by a
+      concrete comparison, instead of paying a forward pass for it. -/
+  weightSize : String → M Nat
   /-- Number `i` of the certificate. Free: the certificate is charged once per proof (`read`). -/
   cert : Nat → M V
   /-- How many numbers the certificate holds. Free. -/
@@ -184,6 +188,7 @@ abbrev Checker := (I : Interp) → I.M I.N
   N := Nat
   weight := CostM.weight
   weightShape := CostM.weightShape
+  weightSize := CostM.weightSize
   cert := CostM.cert
   certSize := CostM.certSize
   lit := CostM.lit
@@ -225,6 +230,7 @@ namespace Interp
 @[simp] theorem counting_N : counting.N = Nat := rfl
 @[simp] theorem counting_weight : counting.weight = CostM.weight := rfl
 @[simp] theorem counting_weightShape : counting.weightShape = CostM.weightShape := rfl
+@[simp] theorem counting_weightSize : counting.weightSize = CostM.weightSize := rfl
 @[simp] theorem counting_cert : counting.cert = CostM.cert := rfl
 @[simp] theorem counting_certSize : counting.certSize = CostM.certSize := rfl
 @[simp] theorem counting_lit : counting.lit = CostM.lit := rfl
