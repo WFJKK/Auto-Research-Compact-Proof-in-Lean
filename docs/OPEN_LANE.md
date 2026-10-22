@@ -78,7 +78,10 @@ never evidence.
 
     python3 -m pytest scripts/test_accept.py -v
 
-needs the project built (`lake build` of the library and `lake build acceptcheck`) and the pipeline
+needs the project built (`lake build` of the library and `lake build acceptcheck`; candidates may import any
+`Mathlib.*` module, so a machine that built only the library's own imports also needs the tactic modules the
+pilot's proofs use, `lake build Mathlib.Tactic.IntervalCases Mathlib.Tactic.Linarith Mathlib.Tactic.Ring`, or
+a candidate fails to compile through no fault of its own) and the pipeline
 repository next to this one (or `COMPACT_PROOF_REPO`). The tests submit the example and every kind of wrong
 candidate: a claim one too high, `sorry`, `native_decide`, a theorem of another type, a conditional claim,
 another network's target, a macro that rewrites `theorem`, bad manifests, a module that tries to write a

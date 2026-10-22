@@ -624,3 +624,32 @@ def test_the_service_reports_the_identity_its_receipts_carry(work):
     with_hook = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "identity"], capture_output=True, text=True,
                                timeout=600, env={**os.environ, **SMALL_BUDGET})
     assert json.loads(with_hook.stdout)["policy"] != ident["policy"]  # the hooks are part of the policy
+
+
+PILOT2 = PROJECT / "examples" / "open_lane" / "pilot2_max2_tiny"
+PILOT2_EXPECTED = {  # from the receipts the Mac's service wrote on 22 October 2026 (receipt-mac-2026-10-22.json)
+    "r1_ColFull": (64, "refused", None, None),
+    "r1_ColFull2": (64, "scored", 951, 1031),
+    "r1_Col21": (21, "scored", 455, 535),
+    "r2_Six": (6, "scored", 189, 269),
+    "r2_Col32": (32, "scored", 453, 533),
+    "r3_Col38": (38, "scored", 456, 536),
+    "r4_Full64": (64, "scored", 639, 719),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PILOT2_EXPECTED))
+def test_the_pilot_2_proofs_reproduce_their_receipts(work, name):
+    """The agent's seven submissions of pilot 2 (examples/open_lane/pilot2_max2_tiny), resubmitted: the same
+    count, scoring status, bill and length as the receipts of the run, and the description size recorded
+    there, under the default policy."""
+    count, status, bill, length = PILOT2_EXPECTED[name]
+    r = submit(PILOT2 / name, work)
+    assert r["status"] == "accepted" and r["certified_count"] == count, (name, r["reason"])
+    s = r["scoring"]
+    assert s["status"] == status, (name, s)
+    assert s.get("bill") == bill and s.get("length") == length, (name, s)
+    recorded = json.loads((PILOT2 / name / "receipt-mac-2026-10-22.json").read_text())["scoring"]
+    assert s.get("description_size") == recorded.get("description_size"), (name, s, recorded)
+    if status == "refused":
+        assert "Eq.ndrec_symm" in s["reason"]
