@@ -1,4 +1,5 @@
 import CompactCheck.CountedCheck
+import CompactCheck.CountedGeneral
 
 /-!
 # The counted language, as an interface: a checker is written for every interpreter
@@ -173,6 +174,11 @@ structure Interp : Type 1 where
   /-- The checker's rules, charged as `cost-v3` charges the leaf (`CostM.single`, `CostM.interval`). -/
   single : Graph → Task → Input → M B
   interval : Graph → Task → Box → M B
+  /-- The single rule on a general network (attention): the general checker's exact forward pass on one
+      input, charged as cost-v3 charges a single leaf of a general network (`CostM.gsingle`,
+      `CountedGeneral.lean`; its soundness is `CostM.gsingle_correct`). `single` covers linear networks
+      only; on a network with attention it fails. -/
+  gsingle : Graph → Task → Input → M B
 
 instance instMonadInterp (I : Interp) : Monad I.M := I.monad
 
@@ -219,6 +225,7 @@ abbrev Checker := (I : Interp) → I.M I.N
   nofNat := id
   single := CostM.single
   interval := CostM.interval
+  gsingle := CostM.gsingle
 
 /-! ## The counting interpreter, operation by operation (all by `rfl`, for `simp`) -/
 
@@ -264,6 +271,7 @@ theorem counting_bor_run (cat : String) (a b : Bool) (env : Env) (c : Cost) :
 @[simp] theorem counting_nofNat : counting.nofNat = id := rfl
 @[simp] theorem counting_single : counting.single = CostM.single := rfl
 @[simp] theorem counting_interval : counting.interval = CostM.interval := rfl
+@[simp] theorem counting_gsingle : counting.gsingle = CostM.gsingle := rfl
 
 /-- `do` notation in a checker uses the interpreter's monad; for the counting interpreter that is
     `CostM`'s, so `CostM.run_bind` and `CostM.run_pure` apply once these two are rewritten. -/

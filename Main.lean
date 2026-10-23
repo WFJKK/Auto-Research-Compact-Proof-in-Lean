@@ -1,6 +1,7 @@
 import CompactCheck.Json
 import CompactCheck.Semantics
 import CompactCheck.CountedCheck
+import CompactCheck.CountedGeneral
 
 /-!
 # The `compactcheck` program
@@ -29,6 +30,12 @@ import CompactCheck.CountedCheck
         Check a proof and bill it under cost-v3 (CountedCheck.lean): the last
         line is {"certified": n, "length": total, "by_category": {...}}, or
         {"status": "rejected", "reason": ...}. Linear networks only, for now.
+
+    compactcheck gsingle <network.json> <inputs.json>
+        The open lane's single rule for general networks (`CostM.gsingle`,
+        CountedGeneral.lean) on each input of a JSON list of token lists:
+        the verdict and the cost-v3 charge, one JSON object per line. For
+        comparing the charge with the Python checker's single leaf.
 
     compactcheck floats <network.json> <inputs.json>
         The logits for each input computed in floats with the spec's
@@ -83,6 +90,19 @@ def runLogits (netPath inputsPath : String) : IO UInt32 := do
     | none => Json.null
   IO.println (Json.arr rows.toArray).compress
   return 0
+
+def runGSingle (netPath inputsPath : String) : IO UInt32 := do
+  let net ← loadNetwork netPath
+  let inputs ← readInputs inputsPath
+  match dweights net.weights with
+  | none => throw (IO.userError "a weight is not a tensor of dyadic numbers")
+  | some dw =>
+    for x in inputs do
+      let row := match gsingleRun net.graph dw net.task x with
+        | some (b, k) => Json.mkObj [("input", Lean.toJson x), ("verdict", Lean.toJson b), ("charge", Lean.toJson k)]
+        | none => Json.mkObj [("input", Lean.toJson x), ("status", Json.str "unsupported")]
+      IO.println row.compress
+    return 0
 
 def ruleName : Rule → String
   | .single => "single"
@@ -167,10 +187,12 @@ def main (args : List String) : IO UInt32 := do
   | ["brute", net] => runBrute net
   | ["logits", net, inputs] => runLogits net inputs
   | ["floats", net, inputs] => runFloats net inputs
+  | ["gsingle", net, inputs] => runGSingle net inputs
   | ["leaves", net, proof] => runLeaves net proof
   | [net, proof] => runCheck net proof
   | _ =>
     IO.eprintln ("usage: compactcheck <network.json> <proof.json> | brute <network.json> | " ++
       "logits <network.json> <inputs.json> | leaves <network.json> <proof.json> | " ++
-      "cost <network.json> <proof.json> | floats <network.json> <inputs.json>")
+      "cost <network.json> <proof.json> | floats <network.json> <inputs.json> | " ++
+      "gsingle <network.json> <inputs.json>")
     return 2

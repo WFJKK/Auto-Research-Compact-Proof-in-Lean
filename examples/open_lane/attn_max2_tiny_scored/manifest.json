@@ -1,0 +1,18 @@
+{
+ "schema": "open-lane-candidate-v1",
+ "candidate_id": "attn-max2-tiny-scored",
+ "model": "tests/attn_max2_tiny",
+ "network": "attn_max2_tiny-v8d4-s1",
+ "claimed_count": 64,
+ "theorem": "Candidate.AttnTinyScored.performance",
+ "modules": [
+  "Candidate/AttnTinyScored.lean"
+ ],
+ "scored": {
+  "checker": "Candidate.AttnTinyScored.D",
+  "sound": "Candidate.AttnTinyScored.D_sound",
+  "instance": "Candidate.AttnTinyScored.D_instance",
+  "certificate": [],
+  "claimed_bill": 12224
+ }
+}

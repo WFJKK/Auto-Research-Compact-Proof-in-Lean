@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 4 of the language, policy v4, 22 October)
+# The counted language (step 2 of the open lane; version 4 of the language, policy v5, 23 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -21,7 +21,8 @@ A checker is a function of an interpreter:
 truth values `B`, counts `N`; `weight`, `weightShape`, `weightSize`, `cert`, `certSize`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
 `max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nscale`, `selectV`,
 `bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
-`single` and `interval`. The checker's own code is ordinary Lean on lists, `Nat` indices and strings
+`single` and `interval` (linear networks) and `gsingle` (any network the general checker follows, such as
+attention; below). The checker's own code is ordinary Lean on lists, `Nat` indices and strings
 around these calls, and it has to typecheck for every `I`: so it can never look inside a value of `I.V`,
 `I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`, or
 `nscale k`: a concrete `k` if true), a choice between two numbers (`selectV`, charged) or another truth
@@ -54,7 +55,9 @@ charged gate. The full list of signatures is the structure itself (CountedOps.le
 - `charge category n`: adds to the bill (a program can only make itself longer);
 - `single graph task x`: the single-input rule, charged `singleCost` (one exact forward pass and the
   comparison, exactly what `cost-v3` charges a `single` leaf); `interval graph task box`: the interval
-  rule on a box, charged `intervalCost`;
+  rule on a box, charged `intervalCost`; both for linear networks;
+- `gsingle graph task x`: the single-input rule on a general network (attention), charged what `cost-v3`
+  charges a `single` leaf of such a network (below);
 - loops, conditionals on `Nat`, lists and arrays, `nsucc`, `nadd`: free, as the Python checker's
   bookkeeping is free.
 
@@ -136,6 +139,55 @@ bill. The description-size budget bounds the free structure around it; it is a b
 bill are both kernel-checked for the exact checker, certificate and weights; nothing of a candidate is ever
 executed by the service.
 
+## Attention networks: the general single rule and split instances (23 October)
+
+`single` runs the linear checker; on a network with attention its cost function has no price for softmax
+and the rule fails, so on such a network not even brute force could be written. `gsingle graph task x`
+(`CountedGeneral.lean`) is the single rule for every network the general checker of `General.lean`
+follows, the legacy lane's checker for these networks (`checkGeneral_sound`): it runs the network on one
+input with that checker's exact dyadic arithmetic, `exp` and softmax enclosed in rational bounds, and
+certifies the input if the label's lower bound is above every other output's upper bound. Its charge is
+`cost-v3`'s for a `single` leaf of a general network (`core/check/general.py`):
+
+- a product with the one-hot input (a lookup): the output's size; any other matrix product: the output's
+  size times the inner dimension;
+- a sum, difference, product, addition, negation or `exp`: the output's size; a sum over a dimension: the
+  output's size times (the summed length - 1); a softmax: 3 per entry;
+- indexing, transposing, reshaping, concatenating, stacking, parameters: nothing;
+- the final comparison of the label's logit with the others: (outputs - 1).
+
+Only the operations that depend on the input are charged per call. `cost-v3` charges the others once, to
+`extract`, which the open lane does not compute yet, so the service refuses scoring on a general network
+that has any (no attention network of the zoo has). `extract` for a general network is its number of
+weights, not counting the scalar constants the exporter adds (`#const`), as in `cost-v3`.
+`scripts/test_gsingle_cost.py` compares the charge and the verdict with the Python checker's single leaf
+on every development network of the attention models; `compactcheck gsingle` prints them.
+
+Specifications: `CostM.gsingle_correct` (`CountedGeneralSound.lean`): a call that returns true means the
+network classifies the input correctly, from `generalSingle_correct`; `CostM.gsingle_run_of`: a decided
+fact about `gsingleRun` on the weights gives the call's run and charge.
+
+**Split instances.** On the tiny attention network (`tests/attn_max2_tiny`: 64 inputs, 136 weights) the
+brute-force instance cannot be one `decide +kernel`: within one theorem the kernel's memory grows with
+every forward pass (about 0.1 GB each) and is released only when the theorem is done, and the run did not
+fit in 8 GB. One theorem per call keeps it flat: `examples/open_lane/attn_max2_tiny_scored` (generated by
+`scripts/gen_attn_brute_example.py`) proves one fact per input (`run1 [a, b] = some (true, 191)`, each
+`decide +kernel`), a glue lemma by induction over the inputs (`countSingles_run`: the run of the checker
+is the runs of its calls in sequence, through `run_bind`, `run_pure` and `gsingle_run_of`), and the
+instance from the glue. The service's statement does not change; only its proof is compositional. The
+example compiles in about two minutes at 2.5 GB and is scored at 64 times 191 plus extract 136.
+
+One trap: the kernel must never be asked to compare two different `CostM.run` terms by unfolding. It
+unfolds a structure projection before anything else, and unfolding this one runs the whole checker, the
+evaluation the split avoids (43 s and 5.7 GB on the tiny network when an `exact` relied on unfolding
+`CostM.exec` and `D`). Rewrite with the definitions' equations instead (`rw [CostM.billed, CostM.exec]`,
+and the checker's own definition as a separate `rfl` equation), so that the terms compared are identical.
+
+The service compiles candidates with sequential elaboration (`-DElab.async=false`): with Lean's default,
+every theorem is a task, and a module of many theorems makes Lean start threads whose stacks reserve more
+address space than the box can allow (64 GB was not enough for the example's 64 facts). The constants
+built are the same.
+
 ## The manifest and the receipt
 
 A scored submission adds to its manifest
@@ -150,7 +202,7 @@ manifest), `score_eligible` says whether it was scored, and the `scoring` block 
 
     length = claimed_bill + extract + read,  extract = number of weight entries,  read = certificate size
 
-The mapping to `cost-v3`'s categories: `single` and `interval` through the counted operations, `extract`
+The mapping to `cost-v3`'s categories: `single`, `interval` and `gsingle` (billed as `single`) through the counted operations, `extract`
 and `read` as above, the arithmetic categories through the primitives. `tree` has no counterpart: the
 structure of a scored proof is its program, bounded by the literal budget below rather than charged.
 
@@ -192,6 +244,8 @@ the bill equals the Python length to the unit and the count equals the Python co
 
 ## What stays open
 
-`token_interval` and `token_convex` as counted operations (needed to reproduce the attention
-frontiers, not for this slice); the `interval` operation with an approximation; a literal budget
-calibrated on more than the brute-force example.
+`interval`, `token_interval` and `token_convex` for general networks as counted operations (needed to
+reproduce the attention frontiers at their legacy price; for now an agent bounds groups of inputs with
+the arithmetic and `exp` operations itself); the input-free operations of a general network in
+`extract`; the `interval` operation with an approximation; a literal budget calibrated on more than the
+brute-force example.

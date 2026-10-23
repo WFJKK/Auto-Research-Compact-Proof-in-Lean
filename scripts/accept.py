@@ -87,10 +87,14 @@ TRUSTED_PREFIXES = ("CompactCheck.", "Mathlib.")
 KINDS = ("performance", "auxiliary")  # a proof of Target, or a lemma: accepted with no count and no score
 COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of the pipeline): unchanged since the open lane began
 # the open lane's policy around those prices, versioned: what a checker may use for free and the budgets.
-# v4 (22 October 2026, after pilot 2 and review round 7): a free weightSize read, graph constructors of the
+# v5 (23 October 2026): the single rule for general networks (attention), `Interp.gsingle`, on the
+# allowlist, priced as cost-v3 prices a single leaf of such a network; extract for a general network is its
+# weight count without the exporter's scalar constants, and a general network with charged operations that
+# do not depend on the input is refused scoring (cost-v3 charges them once; the open lane does not yet).
+# v4 (22 October, after pilot 2 and review round 7): a free weightSize read, graph constructors of the
 # linear family and two audited match-compiler constants on the allowlist. v3 (21 October): language
 # version 4 and the description-size budget. Recorded in every receipt and in the policy digest.
-POLICY_VERSION = "open-lane-policy-v4"
+POLICY_VERSION = "open-lane-policy-v5"
 ASSURANCE = "kernel_checked_instance"  # a scored result's count and bill are both kernel-checked, never executed
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")
@@ -269,7 +273,11 @@ def compile_module(ws: Path, root: Path, module: str, src: Path, lean: Path, lp:
     out = ws / "out" / (module.replace(".", "/") + ".olean")
     out.parent.mkdir(parents=True, exist_ok=True)
     env = box_env(ws, lean, lp)
-    cmd = [str(lean), "-R", str(root), "-o", str(out), str(src)]
+    # Elaboration in one thread: with asynchronous elaboration (Lean's default) every theorem of a module is a
+    # task, and a module of many theorems (an instance split into one decided fact per input) makes Lean start
+    # threads whose stacks reserve more address space than any limit the box can set (64 GB was not enough for
+    # 64 facts; the process reserved about 77 GB unlimited). Sequential elaboration builds the same constants.
+    cmd = [str(lean), "-DElab.async=false", "-R", str(root), "-o", str(out), str(src)]
     res = run_boxed(ws, cmd, env, mode, timeout_s, [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp)
     res["module"] = module
     res["olean"] = str(out)
@@ -555,7 +563,7 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     """The scored path, after verification: the closure check, the kernel's two challenges, the budgets, the
     length. Returns the receipt's `scoring` block; never raises for the candidate's faults."""
     net = json.loads(net_json.read_text())
-    extract = sum(len(w["ints"]) for w in net["weights"])
+    extract = extraction_cost(net)
     read = len(scored["certificate"])
     out = {"status": None, "reason": None, "assurance": ASSURANCE, "cost_model": COST_MODEL,
            "bill": None, "extract": extract, "read": read, "length": None,
@@ -569,6 +577,10 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     last = last_json(chk["stdout"])
     if chk["timed_out"] or chk["rc"] != 0 or last is None:
         raise Infra(f"acceptcheck closure failed: {(chk['stdout'] + chk['stderr'])[-1500:]}")
+    if extract is None:
+        out.update(status="refused", reason="the network has operations that do not depend on the input and cost "
+                   "something; cost-v3 charges them to extract once, which the open lane does not compute yet")
+        return out
     if last.get("status") != "ok":
         out.update(status="refused", reason="the checker uses constants outside the counted language: "
                    + ", ".join(last.get("offending") or []) + (f" ({last['reason']})" if last.get("reason") else ""))
@@ -607,6 +619,27 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     # the length, in cost-v3 units
     out.update(status="scored", bill=scored["claimed_bill"], length=scored["claimed_bill"] + extract + read)
     return out
+
+
+FREE_OPS = ("input", "param", "index", "transpose", "unsqueeze", "expand", "cat", "stack", "zerosLike")
+
+
+def extraction_cost(net: dict) -> int | None:
+    """cost-v3's E for a network file: one per parameter of the model. Constants the exporter turns into
+    weights (`#const...`, such as an attention scale) are literals of the model's code, not parameters,
+    and cost-v3 does not count them. On a general network, cost-v3 also charges to E the operations that
+    do not depend on the input, computed once per proof; `None` if there is one that costs something
+    (none of the zoo's attention networks has one), so that the length is never understated."""
+    E = sum(len(w["ints"]) for w in net["weights"] if not w["name"].startswith("#const"))
+    if net.get("general"):
+        nodes = net["graph"]["nodes"]
+        deps = []
+        for op in nodes:
+            args = [op[k] for k in ("arg", "left", "right") if k in op] + list(op.get("args") or [])
+            deps.append(op["op"] == "input" or any(deps[a] for a in args if isinstance(a, int) and a < len(deps)))
+        if any(not d and op["op"] not in FREE_OPS for d, op in zip(deps, nodes)):
+            return None
+    return E
 
 
 def policy_digest() -> str:

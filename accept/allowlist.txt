@@ -45,6 +45,7 @@ CompactCheck.Interp.nadd
 CompactCheck.Interp.nofNat
 CompactCheck.Interp.single
 CompactCheck.Interp.interval
+CompactCheck.Interp.gsingle
 CompactCheck.instMonadInterp
 CompactCheck.Checker
 

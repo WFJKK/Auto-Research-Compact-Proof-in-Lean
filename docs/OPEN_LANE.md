@@ -64,7 +64,9 @@ of the interpreter (`docs/COUNTED.md`), as `examples/open_lane/max2_tiny_scored`
 `max2_tiny_agent_cols23`, the pilot agent's proof in the first counted language (verified, refused
 scoring); `max2_tiny_cols23_v3`, that proof ported by hand to the current language (scored);
 `max2_tiny_decision_tree`, a reviewer's counterexample written in the current language, where it bills
-every node of its tree.
+every node of its tree; `attn_max2_tiny_scored`, brute force on a tiny attention network through the
+general single rule, its instance proved from one kernel-decided fact per input (docs/COUNTED.md, "Attention
+networks").
 
 ## Kinds of submission
 
@@ -77,6 +79,7 @@ never evidence.
 ## Tests
 
     python3 -m pytest scripts/test_accept.py -v
+    python3 -m pytest scripts/test_gsingle_cost.py -v   # the general single rule's charge against Python's
 
 needs the project built (`lake build` of the library and `lake build acceptcheck`; candidates may import any
 `Mathlib.*` module, so a machine that built only the library's own imports also needs the tactic modules the

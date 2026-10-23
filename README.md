@@ -106,6 +106,7 @@ and so does this one.
 | `GeneralOpsSound.lean` | each operation of `General.lean` keeps the true values inside its intervals |
 | `GeneralSound.lean` | `checkGeneral_sound` and the lemmas it rests on |
 | `FileSound.lean` | `checkProofFile_sound`: both checkers, as the program runs them |
+| `Counted*.lean` | the open lane's counted language (docs/COUNTED.md); `CountedGeneral.lean` and `CountedGeneralSound.lean`: the single rule on attention networks as a counted operation |
 | `Json.lean`, `../Main.lean` | reading files, and the `compactcheck` program |
 | `*Test.lean` | tests; the build fails if one fails |
 | `Tutorial.lean` | Lean basics, with exercises |
@@ -155,6 +156,9 @@ The scripts need the pipeline's Python environment (numpy, torch).
     # the same for an attention model or the xorformer, leaf by leaf;
     # resumes from the log if interrupted
     python3 scripts/compare_general.py <repo> models/attn-max2 --log attn-max2.jsonl
+
+    # the open lane's single rule on an attention network: verdict and cost-v3 charge per input
+    .lake/build/bin/compactcheck gsingle attn-max2-v64-s0.json inputs.json
 
     # Lean's semantics in float64 against PyTorch, on every development network
     python3 scripts/compare_floats.py <repo> models/attn-max2

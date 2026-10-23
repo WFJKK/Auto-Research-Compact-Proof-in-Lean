@@ -27,6 +27,7 @@ SCORED = PROJECT / "examples" / "open_lane" / "max2_tiny_scored"
 AGENT = PROJECT / "examples" / "open_lane" / "max2_tiny_agent_cols23"
 PORT = PROJECT / "examples" / "open_lane" / "max2_tiny_cols23_v3"
 TREE = PROJECT / "examples" / "open_lane" / "max2_tiny_decision_tree"
+ATTN = PROJECT / "examples" / "open_lane" / "attn_max2_tiny_scored"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -721,7 +722,7 @@ def test_a_checker_may_build_a_graph_of_the_linear_family_and_run_single_on_it(w
     assert r["status"] == "accepted" and r["certified_count"] == 64, r["reason"]
     s = r["scoring"]
     assert s["status"] == "scored", s
-    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v4"
+    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v5"
 
 
 def test_weight_sizes_are_read_for_free(work, tmp_path):
@@ -756,3 +757,19 @@ theorem D_sound :""")
     s = r["scoring"]
     assert s["status"] == "scored", s
     assert s["bill"] == 64 * 63
+
+
+# ---- general networks (attention) ---------------------------------------------------------------------
+def test_a_scored_proof_on_an_attention_network_splits_its_instance(work):
+    """Brute force on the tiny attention network (tests/attn_max2_tiny, 64 inputs, 136 weights) through the
+    general single rule `I.gsingle`, its instance proved from one kernel-decided fact per input: one
+    `decide +kernel` over the 64 forward passes does not fit in memory. Scored at 64 times 191, the Python
+    checker's charge for a single leaf of this network (scripts/test_gsingle_cost.py), plus extract 136."""
+    r = submit(ATTN, work)
+    assert r["status"] == "accepted", r["reason"]
+    assert r["certified_count"] == 64 and r["execution_assurance"] == "kernel_checked_instance"
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 64 * 191 and s["extract"] == 136 and s["read"] == 0
+    assert s["length"] == 64 * 191 + 136
+    assert set(s["axioms"]) <= {"propext", "Classical.choice", "Quot.sound"}

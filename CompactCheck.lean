@@ -3,6 +3,8 @@ import CompactCheck.Walk
 import CompactCheck.Counted
 import CompactCheck.CountedCheck
 import CompactCheck.CountedOps
+import CompactCheck.CountedGeneral
+import CompactCheck.CountedGeneralSound
 import CompactCheck.LinAlg
 import CompactCheck.LinAlgTest
 import CompactCheck.LinAlgRandomTest
