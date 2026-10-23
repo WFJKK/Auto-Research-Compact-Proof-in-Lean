@@ -1,0 +1,18 @@
+{
+ "schema": "open-lane-candidate-v1",
+ "candidate_id": "attn-max2-tiny-tokens",
+ "model": "tests/attn_max2_tiny",
+ "network": "attn_max2_tiny-v8d4-s1",
+ "claimed_count": 64,
+ "theorem": "Candidate.AttnTinyTokens.performance",
+ "modules": [
+  "Candidate/AttnTinyTokens.lean"
+ ],
+ "scored": {
+  "checker": "Candidate.AttnTinyTokens.D",
+  "sound": "Candidate.AttnTinyTokens.D_sound",
+  "instance": "Candidate.AttnTinyTokens.D_instance",
+  "certificate": [],
+  "claimed_bill": 9904
+ }
+}

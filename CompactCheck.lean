@@ -43,4 +43,5 @@ import CompactCheck.TokensMixSound
 import CompactCheck.TokensLeaveSound
 import CompactCheck.TokensSound
 import CompactCheck.TokensLeafSound
+import CompactCheck.TokensCost
 import CompactCheck.FileSound

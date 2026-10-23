@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 4 of the language, policy v6, 23 October)
+# The counted language (step 2 of the open lane; version 4 of the language, policy v7, 23 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -22,8 +22,8 @@ truth values `B`, counts `N`; `weight`, `weightShape`, `weightSize`, `cert`, `ce
 `max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nscale`, `selectV`,
 `bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
 `single` and `interval` (linear networks), `gsingle` (any network the general checker follows, such as
-attention; below) and `ginterval` (the interval rule on such networks, in the maximum-knowledge condition
-only; below). The checker's own code is ordinary Lean on lists, `Nat` indices and strings
+attention; below), and `ginterval` and `gtokenIntervals` (the interval and token_interval rules on such
+networks, in the maximum-knowledge condition only; below). The checker's own code is ordinary Lean on lists, `Nat` indices and strings
 around these calls, and it has to typecheck for every `I`: so it can never look inside a value of `I.V`,
 `I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`, or
 `nscale k`: a concrete `k` if true), a choice between two numbers (`selectV`, charged) or another truth
@@ -61,6 +61,9 @@ charged gate. The full list of signatures is the structure itself (CountedOps.le
   charges a `single` leaf of such a network (below);
 - `ginterval graph task box`: the interval rule on a general network, charged what `cost-v3` charges an
   `interval` leaf of such a network; maximum-knowledge condition only (below);
+- `gtokenIntervals graph task boxes`: the token_interval rule on a list of boxes, one verdict per box,
+  charged what `cost-v3` charges those `token_interval` leaves in one proof; maximum-knowledge condition
+  only (below);
 - loops, conditionals on `Nat`, lists and arrays, `nsucc`, `nadd`: free, as the Python checker's
   bookkeeping is free.
 
@@ -197,7 +200,7 @@ every theorem is a task, and a module of many theorems makes Lean start threads 
 address space than the box can allow (64 GB was not enough for the example's 64 facts). The constants
 built are the same.
 
-## Knowledge conditions (23 October, policy v6)
+## Knowledge conditions (23 October, policies v6 and v7)
 
 An open-lane run is one of two experimental conditions, set per run (`--knowledge minimal | maximum` to the
 service; `open_lane.knowledge` in the pipeline's run config):
@@ -206,9 +209,8 @@ service; `open_lane.knowledge` in the pipeline's run config):
   `gsingle`, the arithmetic and comparison primitives and `exp`; any bound over a group of inputs it builds
   and proves itself.
 - **maximum**: the base allowlist plus `accept/allowlist-maximum.txt`, the legacy lane's rules for groups of
-  inputs on general networks as operations, proved sound and priced as `cost-v3` prices the leaf: so far
-  `ginterval`. `token_interval` (on the branch `tokens`, to be rebased) and `token_convex` (not yet in Lean)
-  are to follow.
+  inputs on general networks as operations, proved sound and priced as `cost-v3` prices the leaf:
+  `ginterval` (policy v6) and `gtokenIntervals` (policy v7). `token_convex` (not yet in Lean) is to follow.
 
 The two runs differ only in what the agent is given, so their difference measures how much the agent
 depends on the supplied rules. The condition is part of the policy digest and recorded in every receipt
@@ -231,6 +233,59 @@ every input of the box is answered correctly, from `generalInterval_correct`) an
 `scripts/test_gsingle_cost.py` compares both with the Python checker's interval leaf on every development
 network of the attention models (55 of 55).
 
+## The token_interval rule (23 October, policy v7)
+
+`gtokenIntervals graph task boxes` (`TokensCost.lean`) runs the general checker's token_interval leaf
+(`generalTokenInterval`, `Tokens.lean`) on each box of a list and returns one verdict per box, `false` for
+a box whose label is not constant (no charge there, as in Python). The leaf keeps each position's rows
+apart per token for as long as the graph allows (rows that depend on one position's token, a constant plus
+weighted rows, per-input values where only one position varies), as `core/check/tokens.py` does; its
+soundness is `generalTokenInterval_correct`, and `CostM.gtokenIntervals_correct` gives, for a run, one
+verdict per box and the correctness of every input of a box answered true.
+
+The price is `cost-v3`'s, in its two categories:
+
+- `token_interval`: each leaf's own work, operation by operation as the Python evaluator charges it
+  (`tcostOp`, which follows `tevalOp` step by step and computes each value with the same functions,
+  `tcostOp_fst`), and twice the single rule's price for the operations the token rules do not cover;
+- `tables`: the rows that depend on their token alone (a lookup, then constants). Python keeps them for the
+  whole proof under a key (node, origin, position, and for a term the matrix products since) and charges
+  each row once. Each leaf here returns its requests for such rows (`RowReq`), and `tablesCharge` charges
+  them once over the list, in order.
+
+Why a list: the bill cannot hold the memo. A checker can write any category to the bill (`charge`, and
+the category argument of every primitive), so a marker meaning "these rows are paid" could be planted, or
+paid for with work the checker does anyway. Within one call the memo is out of the checker's reach. A
+proof that puts all its token_interval leaves in one call pays `cost-v3`'s price exactly; several calls pay
+for their rows again, never less.
+
+`scripts/test_gtokens_cost.py` compares, box by box, the verdict, the charge to `token_interval` and what
+the box adds to `tables` with the Python checker over a sequence of sixteen boxes per network (single
+inputs, one varying position, several, a repeated box, overlapping ranges, a box without a constant
+label), one Python program for the sequence as for one proof: 58 of 58 development networks of the
+attention models. The zoo's networks use only some of the token rules, and a checker may pass a graph of its
+own, so `scripts/test_gtokens_synthetic.py` does the same on two small networks with random weights built to
+take the others (rows times a vector, sums over a row's dimension, softmax, exponential, negation and
+indexing of what leaves the domain, a constant added to a weighted sum, matrix products of per-input values;
+the test checks that Python's evaluator took each of them): 6 of 6. `compactcheck gtokens` prints the same,
+and each box's requests.
+
+**Split instances.** One fact per leaf, `(dweights weights).bind (gtokenLeaf graph · task box) = some r`,
+each `decide +kernel` (`TokenLeafFacts`), and `CostM.gtokenIntervals_run_of_facts` puts them together: the
+call's run, whose bill is arithmetic on the facts' small lists of requests. On the tiny attention network,
+`examples/open_lane/attn_max2_tiny_tokens` (generated by `scripts/gen_attn_tokens_example.py`) certifies
+all 64 inputs with 15 leaves, for each largest token `m` the inputs with `m` first and those with `m` only
+second, at 8,112 + 1,792 = 9,904 (brute force through `gsingle`: 12,224). The largest leaf, eight inputs
+at once, takes the kernel 9.5 s; the module compiles in 76 s at 3.7 GB. The count is
+`certifiedCount_le_numCorrect` (`CountedGeneralSound.lean`): no two boxes share an input (`pairwiseApart`)
+and every box lies in the space (`fits`), both decided on the boxes.
+
+A second form of the trap above: two terms that differ only by a definitional unfolding under `CostM.run`
+also make the kernel unfold the run. `D Interp.counting` has type `CostM Interp.counting.N`, and a lemma
+instantiated by unification may write `Nat` there; comparing the two ran all fifteen leaves in one theorem
+(30 s). The example states the checker's run for any environment and bill (`D_run`, from the call's run)
+and rewrites the instance with it, so no comparison of that kind meets the protected weights.
+
 ## The manifest and the receipt
 
 A scored submission adds to its manifest
@@ -245,7 +300,9 @@ manifest), `score_eligible` says whether it was scored, and the `scoring` block 
 
     length = claimed_bill + extract + read,  extract = number of weight entries,  read = certificate size
 
-The mapping to `cost-v3`'s categories: `single`, `interval` and `gsingle` (billed as `single`) through the counted operations, `extract`
+The mapping to `cost-v3`'s categories: `single`, `interval`, `gsingle` (billed as `single`), `ginterval`
+(billed as `interval`) and `gtokenIntervals` (billed as `token_interval` and `tables`) through the counted
+operations, `extract`
 and `read` as above, the arithmetic categories through the primitives. `tree` has no counterpart: the
 structure of a scored proof is its program, bounded by the literal budget below rather than charged.
 
@@ -287,7 +344,7 @@ the bill equals the Python length to the unit and the count equals the Python co
 
 ## What stays open
 
-`token_interval` and `token_convex` for general networks as counted operations of the maximum-knowledge
-condition (needed to reproduce the attention frontiers at their legacy price); the input-free operations
-of a general network in `extract`; the `interval` operation with an approximation; a literal budget calibrated on more than the
+`token_convex` for general networks as a counted operation of the maximum-knowledge condition (needed to
+reproduce the attention frontiers at their legacy price); the input-free operations of a general network in
+`extract`; the `interval` operation with an approximation; a literal budget calibrated on more than the
 brute-force example.

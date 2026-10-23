@@ -87,6 +87,9 @@ TRUSTED_PREFIXES = ("CompactCheck.", "Mathlib.")
 KINDS = ("performance", "auxiliary")  # a proof of Target, or a lemma: accepted with no count and no score
 COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of the pipeline): unchanged since the open lane began
 # the open lane's policy around those prices, versioned: what a checker may use for free and the budgets.
+# v7 (23 October 2026, evening): the maximum condition adds the legacy lane's token_interval rule for general
+# networks, `Interp.gtokenIntervals` (a list of leaves per call; the rows that depend on their token alone are
+# charged once per call, as cost-v3 charges them once per proof).
 # v6 (23 October 2026, afternoon): knowledge conditions, minimal (the base allowlist) and maximum (plus the legacy
 # lane's interval rule for general networks, `Interp.ginterval`, from allowlist-maximum.txt), chosen by --knowledge
 # and part of the policy digest; the closure check counts a primitive projection of a trusted structure as its
@@ -98,7 +101,7 @@ COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of t
 # v4 (22 October, after pilot 2 and review round 7): a free weightSize read, graph constructors of the
 # linear family and two audited match-compiler constants on the allowlist. v3 (21 October): language
 # version 4 and the description-size budget. Recorded in every receipt and in the policy digest.
-POLICY_VERSION = "open-lane-policy-v6"
+POLICY_VERSION = "open-lane-policy-v7"
 ASSURANCE = "kernel_checked_instance"  # a scored result's count and bill are both kernel-checked, never executed
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")

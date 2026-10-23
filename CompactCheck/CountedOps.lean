@@ -1,5 +1,6 @@
 import CompactCheck.CountedCheck
 import CompactCheck.CountedGeneral
+import CompactCheck.TokensCost
 
 /-!
 # The counted language, as an interface: a checker is written for every interpreter
@@ -185,6 +186,14 @@ structure Interp : Type 1 where
       maximum-knowledge condition (`accept/allowlist-maximum.txt`): it is one of the legacy lane's rules
       for groups of inputs, supplied rather than found. -/
   ginterval : Graph → Task → Box → M B
+  /-- The token_interval rule on a general network, for a list of leaves: per leaf, the general checker's
+      token_interval leaf (each position's rows kept apart per token for as long as the graph allows),
+      charged as cost-v3 charges a proof's token_interval leaves: each leaf's own work to `token_interval`,
+      and the rows that depend on their token alone to `tables`, once over the list (`CostM.gtokenIntervals`,
+      `TokensCost.lean`; its soundness is `CostM.gtokenIntervals_correct`). One verdict per box, `false` for
+      a box without a constant label. One call with all of a proof's token_interval leaves pays cost-v3's
+      price; each further call pays for its rows again. Allowed only in the maximum-knowledge condition. -/
+  gtokenIntervals : Graph → Task → List Box → M (List B)
 
 instance instMonadInterp (I : Interp) : Monad I.M := I.monad
 
@@ -233,6 +242,7 @@ abbrev Checker := (I : Interp) → I.M I.N
   interval := CostM.interval
   gsingle := CostM.gsingle
   ginterval := CostM.ginterval
+  gtokenIntervals := CostM.gtokenIntervals
 
 /-! ## The counting interpreter, operation by operation (all by `rfl`, for `simp`) -/
 
@@ -280,6 +290,7 @@ theorem counting_bor_run (cat : String) (a b : Bool) (env : Env) (c : Cost) :
 @[simp] theorem counting_interval : counting.interval = CostM.interval := rfl
 @[simp] theorem counting_gsingle : counting.gsingle = CostM.gsingle := rfl
 @[simp] theorem counting_ginterval : counting.ginterval = CostM.ginterval := rfl
+@[simp] theorem counting_gtokenIntervals : counting.gtokenIntervals = CostM.gtokenIntervals := rfl
 
 /-- `do` notation in a checker uses the interpreter's monad; for the counting interpreter that is
     `CostM`'s, so `CostM.run_bind` and `CostM.run_pure` apply once these two are rewritten. -/

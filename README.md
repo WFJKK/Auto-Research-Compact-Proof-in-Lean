@@ -157,7 +157,8 @@ proof a length. `docs/OPEN_LANE.md` describes the acceptance service and
 | `Counted.lean` | the counted language of the open lane: a monad whose every operation on a number is charged |
 | `CountedCheck.lean` | the checker with its bill: `cost-v3` for proof files (`compactcheck cost`) |
 | `CountedOps.lean` | the checker's rules as charged operations, each with its specification |
-| `CountedGeneral.lean`, `CountedGeneralSound.lean` | the single and interval rules on attention networks as counted operations (`gsingle`; `ginterval`, maximum-knowledge condition only) |
+| `CountedGeneral.lean`, `CountedGeneralSound.lean` | the single and interval rules on attention networks as counted operations (`gsingle`; `ginterval`, maximum-knowledge condition only), and the soundness of the token_interval operation |
+| `TokensCost.lean` | the token_interval rule priced as `cost-v3` prices it (its rows kept once per call), as the counted operation `gtokenIntervals` (maximum-knowledge condition only) |
 | `../AcceptMain.lean` | the `acceptcheck` program: the open lane's trusted check |
 | `Json.lean`, `../Main.lean` | reading files, and the `compactcheck` program |
 | `*Test.lean` | tests; the build fails if one fails |
@@ -216,6 +217,7 @@ The scripts need the pipeline's Python environment (numpy, torch).
     # the open lane's single and interval rules on an attention network: verdict and cost-v3 charge
     .lake/build/bin/compactcheck gsingle attn-max2-v64-s0.json inputs.json
     .lake/build/bin/compactcheck ginterval attn-max2-v64-s0.json boxes.json
+    .lake/build/bin/compactcheck gtokens attn-max2-v64-s0.json boxes.json
 
     # token_interval margin bounds against Python's, box by box
     python3 scripts/compare_tokens.py <repo> models/attn-max2 --log tokens-attn-max2.jsonl

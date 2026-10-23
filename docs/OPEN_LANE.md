@@ -69,7 +69,9 @@ scoring); `max2_tiny_cols23_v3`, that proof ported by hand to the current langua
 `max2_tiny_decision_tree`, a reviewer's counterexample written in the current language, where it bills
 every node of its tree; `attn_max2_tiny_scored`, brute force on a tiny attention network through the
 general single rule, its instance proved from one kernel-decided fact per input (docs/COUNTED.md, "Attention
-networks").
+networks"); `attn_max2_tiny_tokens`, the same network certified by 15 token_interval leaves in one call of
+the maximum-knowledge condition's `gtokenIntervals`, one kernel-decided fact per leaf (docs/COUNTED.md, "The
+token_interval rule").
 
 ## Kinds of submission
 
@@ -82,7 +84,9 @@ never evidence.
 ## Tests
 
     python3 -m pytest scripts/test_accept.py -v
-    python3 -m pytest scripts/test_gsingle_cost.py -v   # the general single rule's charge against Python's
+    python3 -m pytest scripts/test_gsingle_cost.py -v   # the general single and interval rules' charges against Python's
+    python3 -m pytest scripts/test_gtokens_cost.py -v   # the token_interval rule's charges against Python's
+    python3 -m pytest scripts/test_gtokens_synthetic.py -v   # the same on the token rules the zoo never reaches
 
 needs the project built (`lake build` of the library and `lake build acceptcheck`; candidates may import any
 `Mathlib.*` module, so a machine that built only the library's own imports also needs the tactic modules the

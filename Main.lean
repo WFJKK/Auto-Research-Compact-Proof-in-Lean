@@ -3,6 +3,7 @@ import CompactCheck.Semantics
 import CompactCheck.CountedCheck
 import CompactCheck.CountedGeneral
 import CompactCheck.Tokens
+import CompactCheck.TokensCost
 
 /-!
 # The `compactcheck` program
@@ -49,6 +50,16 @@ import CompactCheck.Tokens
         [m, e] for m * 2^e (null if the network has one output), or
         "error" where the proof would be rejected. For comparing with the
         Python checker bound for bound.
+
+    compactcheck gtokens <network.json> <boxes.json>
+        The token_interval rule for general networks, priced (`gtokenRun`,
+        TokensCost.lean), on the boxes of a JSON list in order, as the leaves of
+        one proof: per box a line with the verdict, the charge to token_interval,
+        what the box added to tables (the rows that depend on their token alone,
+        charged once per proof) and its requests for those rows (`reqs`, as
+        `gtokenLeaf` returns them); then a line with the whole list's verdicts
+        and charges. For comparing with the Python checker leaf by leaf, and for
+        writing an instance proof's facts.
 
     compactcheck floats <network.json> <inputs.json>
         The logits for each input computed in floats with the spec's
@@ -218,6 +229,34 @@ def runCost (netPath proofPath : String) : IO UInt32 := do
         ("by_category", Json.mkObj (c.map fun (k, v) => (k, Lean.toJson v)))]).compress
       return 0
 
+def runGTokens (netPath boxesPath : String) : IO UInt32 := do
+  let net ← loadNetwork netPath
+  let boxes ← readBoxes boxesPath
+  match dweights net.weights with
+  | none => throw (IO.userError "a weight is not a tensor of dyadic numbers")
+  | some dw =>
+    let mut acc : Memo × Nat := ([], 0)
+    for b in boxes do
+      let bj := Lean.toJson (b.map fun r => [r.lo, r.hi])
+      match gtokenLeaf net.graph dw net.task b with
+      | none =>
+        IO.println (Json.mkObj [("box", bj), ("status", Json.str "rejected")]).compress
+        return 0
+      | some (v, k, rq) =>
+        let acc' := rq.foldl tablesStep acc
+        let reqs := rq.map fun r => Json.mkObj [("key", Lean.toJson r.key), ("lo", Lean.toJson r.lo),
+          ("hi", Lean.toJson r.hi), ("cost", Lean.toJson r.cost)]
+        IO.println (Json.mkObj [("box", bj), ("verdict", Lean.toJson v), ("token_interval", Lean.toJson k),
+          ("tables", Lean.toJson (acc'.2 - acc.2)), ("requests", Lean.toJson rq.length),
+          ("reqs", Json.arr reqs.toArray)]).compress
+        acc := acc'
+    match gtokenRun net.graph dw net.task boxes with
+    | some (bs, k, t) =>
+      IO.println (Json.mkObj [("verdicts", Lean.toJson bs), ("token_interval", Lean.toJson k),
+        ("tables", Lean.toJson t)]).compress
+    | none => IO.println (Json.mkObj [("status", Json.str "rejected")]).compress
+    return 0
+
 def runTokens (netPath leavesPath : String) : IO UInt32 := do
   let net ← loadNetwork netPath
   let dw ← match dweights net.weights with
@@ -251,11 +290,13 @@ def main (args : List String) : IO UInt32 := do
   | ["ginterval", net, boxes] => runGInterval net boxes
   | ["leaves", net, proof] => runLeaves net proof
   | ["tokens", net, leaves] => runTokens net leaves
+  | ["gtokens", net, boxes] => runGTokens net boxes
   | [net, proof] => runCheck net proof
   | _ =>
     IO.eprintln ("usage: compactcheck <network.json> <proof.json> | brute <network.json> | " ++
       "logits <network.json> <inputs.json> | leaves <network.json> <proof.json> | " ++
       "cost <network.json> <proof.json> | tokens <network.json> <leaves.json> | " ++
       "floats <network.json> <inputs.json> | " ++
-      "gsingle <network.json> <inputs.json> | ginterval <network.json> <boxes.json>")
+      "gsingle <network.json> <inputs.json> | ginterval <network.json> <boxes.json> | " ++
+      "gtokens <network.json> <boxes.json>")
     return 2

@@ -28,6 +28,7 @@ AGENT = PROJECT / "examples" / "open_lane" / "max2_tiny_agent_cols23"
 PORT = PROJECT / "examples" / "open_lane" / "max2_tiny_cols23_v3"
 TREE = PROJECT / "examples" / "open_lane" / "max2_tiny_decision_tree"
 ATTN = PROJECT / "examples" / "open_lane" / "attn_max2_tiny_scored"
+ATTN_TOKENS = PROJECT / "examples" / "open_lane" / "attn_max2_tiny_tokens"
 REPO = Path(os.environ.get("COMPACT_PROOF_REPO", PROJECT.parent / "auto-research-compact-proof"))
 
 pytestmark = pytest.mark.skipif(not (REPO / "core").is_dir(), reason="the pipeline repository is not next to this one")
@@ -722,7 +723,7 @@ def test_a_checker_may_build_a_graph_of_the_linear_family_and_run_single_on_it(w
     assert r["status"] == "accepted" and r["certified_count"] == 64, r["reason"]
     s = r["scoring"]
     assert s["status"] == "scored", s
-    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v6"
+    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v7"
 
 
 def test_weight_sizes_are_read_for_free(work, tmp_path):
@@ -936,6 +937,66 @@ def test_the_interval_rule_for_general_networks_is_scored_only_in_the_maximum_kn
             assert s["status"] == "scored" and s["bill"] == 367, s
         else:
             assert s["status"] == "refused" and "CompactCheck.Interp.ginterval" in s["reason"], s
+
+
+TOKENS_CALL = """import Protected.N_attn_max2_tiny_v8d4_s1_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+import CompactCheck.CountedGeneralSound
+
+namespace Candidate.TokensCall
+open CompactCheck Protected.N_attn_max2_tiny_v8d4_s1_c0
+
+def D : Checker := fun I => do
+  let _ ← I.gtokenIntervals graph task [[⟨3, 3⟩, ⟨3, 3⟩]]
+  pure I.nzero
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  simp only [D, CostM.exec, Interp.counting_bind, Interp.counting_pure, CostM.run_bind] at h
+  split at h
+  · simp only [CostM.run_pure, Interp.counting_nzero, Option.some.injEq, Prod.mk.injEq] at h
+    omega
+  · cases h
+
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 384) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.TokensCall
+"""
+
+
+def test_the_token_interval_rule_for_general_networks_is_scored_only_in_the_maximum_knowledge_condition(work, tmp_path):
+    """`I.gtokenIntervals`, the legacy lane's token_interval rule for general networks, is an operation of the
+    maximum-knowledge condition only. Called on one box of one input of the tiny attention network (charge 160
+    to token_interval and 224 to tables, as the Python checker charges the leaf: scripts/test_gtokens_cost.py),
+    it is scored under --knowledge maximum and refused scoring under the minimal condition."""
+    for knowledge in ("maximum", "minimal"):
+        d = zero_candidate(tmp_path / knowledge, "tokens-call", TOKENS_CALL, "TokensCall", "Candidate.TokensCall", 384)
+        r = submit(d, work, knowledge=knowledge)
+        assert r["status"] == "accepted" and r["certified_count"] == 0 and r["knowledge"] == knowledge, r["reason"]
+        s = r["scoring"]
+        if knowledge == "maximum":
+            assert s["status"] == "scored" and s["bill"] == 384, s
+        else:
+            assert s["status"] == "refused" and "CompactCheck.Interp.gtokenIntervals" in s["reason"], s
+
+
+def test_a_scored_proof_with_token_interval_leaves_splits_its_instance_per_leaf(work):
+    """The tiny attention network certified by 15 token_interval leaves in one `I.gtokenIntervals` call
+    (examples/open_lane/attn_max2_tiny_tokens): for each largest token, the inputs with it at the first
+    position and those with it only at the second. The instance comes from one kernel-decided fact per leaf.
+    Bill 8112 (the leaves' own work) + 1792 (the rows that depend on their token alone, once for all the leaves)
+    = 9904, below brute force through `gsingle` (64 x 191 = 12224); plus extract 136."""
+    r = submit(ATTN_TOKENS, work, knowledge="maximum")
+    assert r["status"] == "accepted", r["reason"]
+    assert r["certified_count"] == 64 and r["execution_assurance"] == "kernel_checked_instance"
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 9904 and s["extract"] == 136 and s["read"] == 0
+    assert s["length"] == 9904 + 136
 
 
 def test_the_knowledge_condition_is_part_of_the_policy_digest():

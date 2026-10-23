@@ -5,3 +5,8 @@
 #
 # The interval rule on a general network: CostM.ginterval, soundness CostM.ginterval_correct (23 October 2026).
 CompactCheck.Interp.ginterval
+#
+# The token_interval rule on a general network, for a list of leaves: CostM.gtokenIntervals, soundness
+# CostM.gtokenIntervals_correct (23 October 2026). The rows that depend on their token alone are charged once
+# per call, as cost-v3 charges them once per proof.
+CompactCheck.Interp.gtokenIntervals
