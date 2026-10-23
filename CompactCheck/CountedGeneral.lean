@@ -57,28 +57,37 @@ def gopCost (g : Graph) (vals : Array GVal) (out : DT) : Op → Nat
   | .softmax _ _ => 3 * shapeSize out.shape
   | _ => 0
 
-/-- Run the operations in order, as `gevalOps` does, and add up the charge of every one of them. -/
-def gcostOps (g : Graph) (w : DWeights) (input : GVal) :
+/-- Run the operations in order, as `gevalOps` does, and add up the charge of every one of them under
+    `price` (the values before the operation, its value, the operation). -/
+def gcostOpsWith (price : Array GVal → DT → Op → Nat) (g : Graph) (w : DWeights) (input : GVal) :
     List Op → Array GVal → Nat → Option (Array GVal × Nat)
   | [], vals, acc => some (vals, acc)
   | op :: ops, vals, acc =>
     match gevalOp g w input vals op with
     | some v =>
       let c := match v.tensor with
-        | some t => gopCost g vals t op
+        | some t => price vals t op
         | none => 0
-      gcostOps g w input ops (vals.push v) (acc + c)
+      gcostOpsWith price g w input ops (vals.push v) (acc + c)
     | none => none
 
-theorem gcostOps_fst (g : Graph) (w : DWeights) (input : GVal) :
+theorem gcostOpsWith_fst (price : Array GVal → DT → Op → Nat) (g : Graph) (w : DWeights) (input : GVal) :
     ∀ (ops : List Op) (vals : Array GVal) (acc : Nat),
-      (gcostOps g w input ops vals acc).map Prod.fst = gevalOps g w input ops vals
+      (gcostOpsWith price g w input ops vals acc).map Prod.fst = gevalOps g w input ops vals
   | [], _, _ => rfl
   | op :: ops, vals, acc => by
-    simp only [gcostOps, gevalOps]
+    simp only [gcostOpsWith, gevalOps]
     cases hv : gevalOp g w input vals op with
     | none => rfl
-    | some v => exact gcostOps_fst g w input ops _ _
+    | some v => exact gcostOpsWith_fst price g w input ops _ _
+
+/-- The single rule's prices, every operation charged. -/
+abbrev gcostOps (g : Graph) (w : DWeights) (input : GVal) : List Op → Array GVal → Nat → Option (Array GVal × Nat) :=
+  gcostOpsWith (gopCost g) g w input
+
+theorem gcostOps_fst (g : Graph) (w : DWeights) (input : GVal) (ops : List Op) (vals : Array GVal) (acc : Nat) :
+    (gcostOps g w input ops vals acc).map Prod.fst = gevalOps g w input ops vals :=
+  gcostOpsWith_fst _ g w input ops vals acc
 
 /-- The output's number of logits, for the final comparison. -/
 def logitCount (out : DT) : Nat :=
@@ -127,7 +136,75 @@ theorem gsingleRun_generalSingle {g : Graph} {w : DWeights} {task : Task} {x : I
         | none => simp [hm] at h
         | some ok =>
           simp only [hm, Option.some.injEq, Prod.mk.injEq] at h
-          simp only [ho, Option.bind_some, hm, h.1]
+          simp only [Option.bind_some, hm, h.1]
+
+/-! ## The interval rule on general networks (the maximum-knowledge condition)
+
+What cost-v3 charges an interval leaf of a general network (`GeneralProgram.run_interval` with
+`_onehot_lookup`): the one-hot input is a box (per position, the tokens `lo..hi`); its product with a
+weight matrix of `d` columns gives per position the smallest and largest row entry, charged `d` for a
+position with one token and `2 d (hi - lo + 1)` otherwise; every other operation costs twice the single
+leaf's price (interval arithmetic on both ends); the final comparison (outputs - 1). As in `gsingle`, every
+operation is charged on every call. A box whose label is not constant certifies nothing and costs nothing,
+as the Python checker never runs the rule there. -/
+
+/-- The lookup from a box of one-hot inputs into a weight matrix with `d` columns. -/
+def boxLookupCost (box : Box) (d : Nat) : Nat :=
+  box.foldl (fun acc r => acc + if r.lo == r.hi then d else 2 * d * (r.hi - r.lo + 1)) 0
+
+/-- The interval leaf's price for one operation. -/
+def gopCostBox (g : Graph) (vals : Array GVal) (out : DT) (op : Op) : Nat :=
+  match op with
+  | .matmul a _ =>
+    match vals[a]? with
+    | some (.box bx) => boxLookupCost bx (out.shape.getLast?.getD 0)
+    | _ => 2 * gopCost g vals out op
+  | _ => 2 * gopCost g vals out op
+
+/-- The interval rule on a general network, with its cost-v3 charge: the verdict of `generalInterval` and the
+    charge, from one evaluation. -/
+def gintervalRun (g : Graph) (w : DWeights) (task : Task) (box : Box) : Option (Bool × Nat) :=
+  match task.constantLabel box with
+  | none => some (false, 0)
+  | some l =>
+    match gcostOpsWith (gopCostBox g) g w (.box box) g.nodes #[] 0 with
+    | none => none
+    | some (vals, cost) =>
+      match vals[g.output]?.bind GVal.tensor with
+      | none => none
+      | some out =>
+        match marginTest out l with
+        | none => none
+        | some ok => some (ok, cost + (logitCount out - 1))
+
+theorem gintervalRun_generalInterval {g : Graph} {w : DWeights} {task : Task} {box : Box} {b : Bool} {k : Nat}
+    (h : gintervalRun g w task box = some (b, k)) : generalInterval g w task box = some b := by
+  unfold gintervalRun at h
+  unfold generalInterval gevalGraph
+  cases hl : task.constantLabel box with
+  | none =>
+    simp only [hl, Option.some.injEq, Prod.mk.injEq] at h
+    simp only [h.1]
+  | some l =>
+    simp only [hl] at h
+    have hfst := gcostOpsWith_fst (gopCostBox g) g w (.box box) g.nodes #[] 0
+    cases hc : gcostOpsWith (gopCostBox g) g w (.box box) g.nodes #[] 0 with
+    | none => simp [hc] at h
+    | some p =>
+      obtain ⟨vals, cost⟩ := p
+      simp only [hc] at h
+      rw [hc] at hfst
+      simp only [Option.map_some] at hfst
+      simp only [Option.bind_eq_bind, ← hfst]
+      cases ho : vals[g.output]?.bind GVal.tensor with
+      | none => simp [ho] at h
+      | some out =>
+        simp only [ho] at h
+        cases hm : marginTest out l with
+        | none => simp [hm] at h
+        | some ok =>
+          simp only [hm, Option.some.injEq, Prod.mk.injEq] at h
+          simp only [Option.bind_some, hm, h.1]
 
 namespace CostM
 
@@ -154,6 +231,34 @@ theorem gsingle_run_of {g : Graph} {task : Task} {x : Input} {env : Env} {c : Co
     | some dw =>
       match gsingleRun g dw task x with
       | some (b, k) => some (b, c.add "single" k)
+      | none => none) = _
+  cases hdw : dweights env.weights with
+  | none => simp [hdw] at h
+  | some dw =>
+    simp only [hdw, Option.bind_some] at h
+    simp only [h]
+
+/-- The interval rule on a general network: bounds the network over a box of inputs with the general
+    checker's interval arithmetic and charges what cost-v3 charges an interval leaf. `false` (not an
+    error) when the box has no constant label; `none` if the weights are not dyadic or the rule cannot
+    follow the network (the input may only be multiplied by a weight matrix). -/
+def ginterval (g : Graph) (task : Task) (box : Box) : CostM Bool := ⟨fun env c =>
+  match dweights env.weights with
+  | none => none
+  | some dw =>
+    match gintervalRun g dw task box with
+    | some (b, k) => some (b, c.add "interval" k)
+    | none => none⟩
+
+/-- How an instance with interval calls splits: one decided fact per call, as for `gsingle_run_of`. -/
+theorem ginterval_run_of {g : Graph} {task : Task} {box : Box} {env : Env} {c : Cost} {b : Bool} {k : Nat}
+    (h : ((dweights env.weights).bind fun dw => gintervalRun g dw task box) = some (b, k)) :
+    (ginterval g task box).run env c = some (b, c.add "interval" k) := by
+  show (match dweights env.weights with
+    | none => none
+    | some dw =>
+      match gintervalRun g dw task box with
+      | some (b, k) => some (b, c.add "interval" k)
       | none => none) = _
   cases hdw : dweights env.weights with
   | none => simp [hdw] at h

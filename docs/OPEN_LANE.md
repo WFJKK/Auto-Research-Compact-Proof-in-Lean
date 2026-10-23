@@ -22,7 +22,10 @@ of inputs the network answers correctly over the reals, ties counting as wrong.
 
 ## What the service does
 
-`python3 scripts/accept.py submit <candidate> --repo <pipeline repo> --work <work dir>`
+`python3 scripts/accept.py submit <candidate> --repo <pipeline repo> --work <work dir> [--knowledge minimal|maximum]`
+
+(`--knowledge` chooses the experimental condition: which operations a scored checker may use; docs/COUNTED.md,
+"Knowledge conditions".)
 
 1. Checks the manifest and the modules' imports.
 2. Exports the network (`scripts/export_network.py`, the pipeline's own tracer and exact weights) and

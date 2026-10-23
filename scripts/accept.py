@@ -87,6 +87,10 @@ TRUSTED_PREFIXES = ("CompactCheck.", "Mathlib.")
 KINDS = ("performance", "auxiliary")  # a proof of Target, or a lemma: accepted with no count and no score
 COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of the pipeline): unchanged since the open lane began
 # the open lane's policy around those prices, versioned: what a checker may use for free and the budgets.
+# v6 (23 October 2026, afternoon): knowledge conditions, minimal (the base allowlist) and maximum (plus the legacy
+# lane's interval rule for general networks, `Interp.ginterval`, from allowlist-maximum.txt), chosen by --knowledge
+# and part of the policy digest; the closure check counts a primitive projection of a trusted structure as its
+# projection function; gsingle charges every operation (the review of the afternoon).
 # v5 (23 October 2026): the single rule for general networks (attention), `Interp.gsingle`, on the
 # allowlist, priced as cost-v3 prices a single leaf of such a network; extract for a general network is its
 # weight count without the exporter's scalar constants, and a general network with charged operations that
@@ -94,7 +98,7 @@ COST_MODEL = "cost-v3"  # the prices (CountedCheck.lean, core/check/cost.py of t
 # v4 (22 October, after pilot 2 and review round 7): a free weightSize read, graph constructors of the
 # linear family and two audited match-compiler constants on the allowlist. v3 (21 October): language
 # version 4 and the description-size budget. Recorded in every receipt and in the policy digest.
-POLICY_VERSION = "open-lane-policy-v5"
+POLICY_VERSION = "open-lane-policy-v6"
 ASSURANCE = "kernel_checked_instance"  # a scored result's count and bill are both kernel-checked, never executed
 IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 IMPORT_LINE = re.compile(r"^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)\s*$")
@@ -102,6 +106,12 @@ COMPILE_TIMEOUT_S = 3600
 CHECK_TIMEOUT_S = 3600
 MEMORY_MB = 12288  # virtual: Mathlib's .olean files are mapped into memory
 ALLOWLIST = LEAN_PROJECT / "accept" / "allowlist.txt"
+# The knowledge conditions (docs/COUNTED.md, "Knowledge conditions"): minimal is the base language; maximum adds
+# the legacy lane's rules for groups of inputs as operations (allowlist-maximum.txt). Set by --knowledge; part of
+# the policy digest and recorded in every receipt, so a run's frontier never mixes the two.
+ALLOWLIST_MAXIMUM = LEAN_PROJECT / "accept" / "allowlist-maximum.txt"
+KNOWLEDGE_CONDITIONS = ("minimal", "maximum")
+KNOWLEDGE = "minimal"
 # the scoring policy (docs/COUNTED.md): the checker's description size and the general layer's kernel work
 # are bounded. The size budget is base + per_param * E in acceptcheck's units (a node 1, a numeral or a
 # string 1 per bit), calibrated so that an honest checker fits (the pilot's column checker is under 8,000)
@@ -465,6 +475,7 @@ def submit(cdir: Path, repo: Path, work: Path, want_mode: str) -> dict:
                "claim_kind": None, "certified_count": None, "domain_size": None, "claimed_count": None, "network": None,
                "theorem": None, "statement": None, "axioms": None, "isolation": None, "steps": [], "digests": {},
                "score_eligible": False, "execution_assurance": None, "cost_model": COST_MODEL, "policy_version": POLICY_VERSION,
+               "knowledge": KNOWLEDGE,
                "scoring": {"status": "not_requested"},
                "seconds": None, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
     ws = None
@@ -577,7 +588,9 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
         return out
     read_extra = [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all
     # the checker touches numbers only through the counted primitives
-    cmd = [str(acceptcheck_binary()), "closure", scored["checker"], str(ALLOWLIST), prot["module"]] + trusted + ["--"] + oleans
+    allowlist = ws / "allowlist.txt"  # the list in force, written where the box can read it
+    allowlist.write_text(allowlist_text())
+    cmd = [str(acceptcheck_binary()), "closure", scored["checker"], str(allowlist), prot["module"]] + trusted + ["--"] + oleans
     chk = run_boxed(ws, cmd, env, mode, CHECK_TIMEOUT_S, read_extra)
     receipt["steps"].append({"step": "closure", "rc": chk["rc"], "seconds": chk["seconds"], "timed_out": chk["timed_out"]})
     last = last_json(chk["stdout"])
@@ -644,11 +657,20 @@ def extraction_cost(net: dict) -> int | None:
     return E
 
 
+def allowlist_text() -> str:
+    """The allowlist in force: the base list, and in the maximum-knowledge condition its additions."""
+    text = ALLOWLIST.read_text() if ALLOWLIST.exists() else ""
+    if KNOWLEDGE == "maximum":
+        text += "\n" + (ALLOWLIST_MAXIMUM.read_text() if ALLOWLIST_MAXIMUM.exists() else "")
+    return text
+
+
 def policy_digest() -> str:
-    """A digest of the scoring policy: the allowlist and the budgets."""
+    """A digest of the scoring policy: the allowlist in force (with the knowledge condition) and the budgets."""
     h = hashlib.sha256()
-    h.update(ALLOWLIST.read_bytes() if ALLOWLIST.exists() else b"")
-    h.update(json.dumps({"policy_version": POLICY_VERSION, "size_budget": [SIZE_BUDGET_BASE, SIZE_BUDGET_PER_PARAM],
+    h.update(allowlist_text().encode())
+    h.update(json.dumps({"policy_version": POLICY_VERSION, "knowledge": KNOWLEDGE,
+                         "size_budget": [SIZE_BUDGET_BASE, SIZE_BUDGET_PER_PARAM],
                          "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS,
                          "allowed_axioms": sorted(ALLOWED_AXIOMS), "trusted_prefixes": TRUSTED_PREFIXES}).encode())
     return h.hexdigest()[:16]
@@ -737,6 +759,7 @@ def main(argv=None) -> int:
     s.add_argument("--repo", type=Path, required=True, help="the pipeline repository")
     s.add_argument("--work", type=Path, required=True, help="networks, protected modules, workspaces and receipts")
     s.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
+    s.add_argument("--knowledge", default="minimal", choices=KNOWLEDGE_CONDITIONS)
     c = sub.add_parser("compile", help="compile a candidate module in a workspace, for development")
     c.add_argument("workspace", type=Path)
     c.add_argument("module", help="Candidate/<Name>.lean, relative to the workspace")
@@ -747,6 +770,7 @@ def main(argv=None) -> int:
     c.add_argument("--claimed", type=int, required=True)
     c.add_argument("--certificate", type=Path)
     c.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
+    c.add_argument("--knowledge", default="minimal", choices=KNOWLEDGE_CONDITIONS)
     p = sub.add_parser("protected")
     p.add_argument("network", type=Path)
     p.add_argument("claimed", type=int)
@@ -754,8 +778,11 @@ def main(argv=None) -> int:
     p.add_argument("--work", type=Path, required=True)
     p.add_argument("--mode", default="hardened", choices=("hardened", "landlock", "process"))
     p.add_argument("--certificate", type=Path, help="a JSON list of numbers, for a scored submission's module")
-    sub.add_parser("identity", help="the service's identity: commit, toolchain, project, policy and binary digests")
+    i = sub.add_parser("identity", help="the service's identity: commit, toolchain, project, policy and binary digests")
+    i.add_argument("--knowledge", default="minimal", choices=KNOWLEDGE_CONDITIONS)
     args = ap.parse_args(argv)
+    global KNOWLEDGE
+    KNOWLEDGE = getattr(args, "knowledge", "minimal")
     if args.cmd == "identity":
         print(json.dumps(identity(), indent=1))
         return 0

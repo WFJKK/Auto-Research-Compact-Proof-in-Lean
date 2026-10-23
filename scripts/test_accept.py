@@ -47,13 +47,13 @@ def copy_bound(nums: list[int]) -> int:
     return sum(max(1, abs(v).bit_length()) for v in nums)
 
 
-def submit(candidate: Path, work: Path, mode: str = "hardened", env: dict | None = None) -> dict:
+def submit(candidate: Path, work: Path, mode: str = "hardened", env: dict | None = None, knowledge: str = "minimal") -> dict:
     """Submit a candidate. With env SMALL_BUDGET the size budget is 592 on the tiny network: the brute-force
     checker (about 370) fits, a copy of its 80 weights (over 1,700) does not. The default budget is
     calibrated for real networks, where the weights outweigh any checker; on the tiny network they do not
     (test_a_copy_of_the_weights_is_refused_under_the_default_policy_on_a_real_network uses the default)."""
     r = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "submit", str(candidate), "--repo", str(REPO),
-                        "--work", str(work), "--mode", mode], capture_output=True, text=True, timeout=3600,
+                        "--work", str(work), "--mode", mode, "--knowledge", knowledge], capture_output=True, text=True, timeout=3600,
                        env={**os.environ, **(env or {})})
     assert r.stdout.strip(), r.stderr
     receipt = json.loads(r.stdout)
@@ -722,7 +722,7 @@ def test_a_checker_may_build_a_graph_of_the_linear_family_and_run_single_on_it(w
     assert r["status"] == "accepted" and r["certified_count"] == 64, r["reason"]
     s = r["scoring"]
     assert s["status"] == "scored", s
-    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v5"
+    assert s["bill"] == 64 * 63 and r["policy_version"] == "open-lane-policy-v6"
 
 
 def test_weight_sizes_are_read_for_free(work, tmp_path):
@@ -876,3 +876,77 @@ def test_a_network_with_charged_operations_on_the_weights_alone_is_refused_scori
     s = r["scoring"]
     assert s["status"] == "refused" and "do not depend on the input" in s["reason"], s
     assert s["extract"] is None and s["size_budget"] is None
+
+
+INTERVAL_CALL = """import Protected.N_attn_max2_tiny_v8d4_s1_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+import CompactCheck.CountedGeneralSound
+
+namespace Candidate.IntervalCall
+open CompactCheck Protected.N_attn_max2_tiny_v8d4_s1_c0
+
+GINTERVAL_DEF
+
+def D : Checker := fun I => do
+  let _ ← GINTERVAL graph task [⟨3, 3⟩, ⟨3, 3⟩]
+  pure I.nzero
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  simp only [D, CostM.exec, Interp.counting_bind, Interp.counting_pure, CostM.run_bind] at h
+  split at h
+  · simp only [CostM.run_pure, Interp.counting_nzero, Option.some.injEq, Prod.mk.injEq] at h
+    omega
+  · cases h
+
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 367) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.IntervalCall
+"""
+
+# the interval rule called by name, and through a primitive projection an elaborator builds (no constant named)
+BY_NAME = INTERVAL_CALL.replace("GINTERVAL_DEF\n\n", "").replace("GINTERVAL", "I.ginterval")
+BY_PROJECTION = INTERVAL_CALL.replace("GINTERVAL_DEF", """open Lean Elab Term Meta in
+/-- `ginterval` of an interpreter as a primitive projection, which names no projection function. -/
+elab "rawGInterval " i:term : term => do
+  let e ← elabTerm i (some (mkConst ``CompactCheck.Interp))
+  let fields := getStructureFields (← getEnv) ``CompactCheck.Interp
+  let some idx := fields.findIdx? (· == `ginterval) | throwError "no field ginterval"
+  return mkProj ``CompactCheck.Interp idx e""").replace("GINTERVAL graph", "(rawGInterval I) graph")
+
+
+@pytest.mark.parametrize("how,lean", [("by-name", BY_NAME), ("by-projection", BY_PROJECTION)])
+def test_the_interval_rule_for_general_networks_is_scored_only_in_the_maximum_knowledge_condition(work, tmp_path, how, lean):
+    """`I.ginterval`, the legacy lane's interval rule for general networks, is an operation of the maximum-knowledge
+    condition only (accept/allowlist-maximum.txt). Called once on a box of one input of the tiny attention
+    network (charge 367: twice the forward pass's arithmetic, the lookups and the final comparison), it is
+    scored under --knowledge maximum and refused scoring under the default, minimal condition, also when an
+    elaborator reaches the field through a primitive projection instead of its name. The proof stays verified;
+    the receipt records the condition."""
+    for knowledge in ("maximum", "minimal"):
+        d = zero_candidate(tmp_path / knowledge, f"interval-{how}", lean, "IntervalCall", "Candidate.IntervalCall", 367)
+        r = submit(d, work, knowledge=knowledge)
+        assert r["status"] == "accepted" and r["certified_count"] == 0 and r["knowledge"] == knowledge, r["reason"]
+        s = r["scoring"]
+        if knowledge == "maximum":
+            assert s["status"] == "scored" and s["bill"] == 367, s
+        else:
+            assert s["status"] == "refused" and "CompactCheck.Interp.ginterval" in s["reason"], s
+
+
+def test_the_knowledge_condition_is_part_of_the_policy_digest():
+    """A run records the service's identity under its condition and checks every receipt against it, so one
+    frontier never mixes the conditions."""
+    out = {}
+    for knowledge in ("minimal", "maximum"):
+        r = subprocess.run([sys.executable, "-B", str(HERE / "accept.py"), "identity", "--knowledge", knowledge],
+                           capture_output=True, text=True, timeout=600)
+        assert r.returncode == 0, r.stderr
+        out[knowledge] = json.loads(r.stdout)
+    assert out["minimal"]["policy"] != out["maximum"]["policy"]
+    assert {k: v for k, v in out["minimal"].items() if k != "policy"} == {k: v for k, v in out["maximum"].items() if k != "policy"}
+

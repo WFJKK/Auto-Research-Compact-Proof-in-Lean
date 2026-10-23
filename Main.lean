@@ -37,6 +37,11 @@ import CompactCheck.CountedGeneral
         the verdict and the cost-v3 charge, one JSON object per line. For
         comparing the charge with the Python checker's single leaf.
 
+    compactcheck ginterval <network.json> <boxes.json>
+        The interval rule for general networks (`CostM.ginterval`) on each box
+        of a JSON list (a box: one [lo, hi] per position): the verdict and the
+        cost-v3 charge, one JSON object per line.
+
     compactcheck floats <network.json> <inputs.json>
         The logits for each input computed in floats with the spec's
         definitions (`semGraph` in Semantics.lean), for any network. Each
@@ -101,6 +106,29 @@ def runGSingle (netPath inputsPath : String) : IO UInt32 := do
       let row := match gsingleRun net.graph dw net.task x with
         | some (b, k) => Json.mkObj [("input", Lean.toJson x), ("verdict", Lean.toJson b), ("charge", Lean.toJson k)]
         | none => Json.mkObj [("input", Lean.toJson x), ("status", Json.str "unsupported")]
+      IO.println row.compress
+    return 0
+
+def readBoxes (path : String) : IO (List Box) := do
+  match (← readJson path).getArr? with
+  | .ok a => a.toList.mapM fun j => match Lean.fromJson? (α := List (List Nat)) j with
+    | .ok rs => rs.mapM fun r => match r with
+      | [lo, hi] => pure (⟨lo, hi⟩ : Range)
+      | _ => throw (IO.userError "a range is [lo, hi]")
+    | .error e => throw (IO.userError e)
+  | .error e => throw (IO.userError e)
+
+def runGInterval (netPath boxesPath : String) : IO UInt32 := do
+  let net ← loadNetwork netPath
+  let boxes ← readBoxes boxesPath
+  match dweights net.weights with
+  | none => throw (IO.userError "a weight is not a tensor of dyadic numbers")
+  | some dw =>
+    for b in boxes do
+      let bj := Lean.toJson (b.map fun r => [r.lo, r.hi])
+      let row := match gintervalRun net.graph dw net.task b with
+        | some (v, k) => Json.mkObj [("box", bj), ("verdict", Lean.toJson v), ("charge", Lean.toJson k)]
+        | none => Json.mkObj [("box", bj), ("status", Json.str "unsupported")]
       IO.println row.compress
     return 0
 
@@ -188,11 +216,12 @@ def main (args : List String) : IO UInt32 := do
   | ["logits", net, inputs] => runLogits net inputs
   | ["floats", net, inputs] => runFloats net inputs
   | ["gsingle", net, inputs] => runGSingle net inputs
+  | ["ginterval", net, boxes] => runGInterval net boxes
   | ["leaves", net, proof] => runLeaves net proof
   | [net, proof] => runCheck net proof
   | _ =>
     IO.eprintln ("usage: compactcheck <network.json> <proof.json> | brute <network.json> | " ++
       "logits <network.json> <inputs.json> | leaves <network.json> <proof.json> | " ++
       "cost <network.json> <proof.json> | floats <network.json> <inputs.json> | " ++
-      "gsingle <network.json> <inputs.json>")
+      "gsingle <network.json> <inputs.json> | ginterval <network.json> <boxes.json>")
     return 2

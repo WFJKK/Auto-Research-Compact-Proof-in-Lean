@@ -95,3 +95,77 @@ def test_gsingle_charges_what_the_python_single_leaf_charges(model, network, tmp
         assert row["input"] == x
         assert single == total, "the Python single leaf charged another category"
         assert (row.get("verdict"), row.get("charge")) == (ok, single), (x, row, ok, single)
+
+
+def boxes_for(space: list[int], task_kind: str, rng: random.Random, n: int) -> list[list[list[int]]]:
+    """Boxes with a constant label, as a proof's interval leaves have: for the largest token m, one position
+    holds m and the others range below it (or above, for the smallest), some of them one token wide; and a
+    few boxes whose label is not constant."""
+    out = []
+    P, V = len(space), space[0]
+    for _ in range(n):
+        m = rng.randrange(V)
+        p = rng.randrange(P)
+        box = []
+        for q in range(P):
+            if q == p:
+                box.append([m, m])
+            elif task_kind == "max":
+                lo = rng.randrange(m + 1)
+                box.append([lo, m] if rng.random() < 0.7 else [lo, lo])
+            else:
+                hi = rng.randrange(m, V)
+                box.append([m, hi] if rng.random() < 0.7 else [hi, hi])
+        out.append(box)
+    out.append([[0, V - 1]] * P)
+    return out
+
+
+@pytest.mark.parametrize("model,network", cases())
+def test_ginterval_charges_what_the_python_interval_leaf_charges(model, network, tmp_path):
+    """The interval rule for general networks (`CostM.ginterval`, the maximum-knowledge condition) against the
+    Python checker's interval leaf on general networks (`GeneralProgram.run_interval`): the same verdict and
+    the same charge on every box with a constant label, and nothing charged on a box without one (the Python
+    checker never runs the rule there)."""
+    import numpy as np
+    from core.check.cost import Counter
+    from core.check.trace import build_any, make_program
+    from core.model_folder import load_model_folder
+    from core.zoo import load_weights, network_entry
+
+    folder = load_model_folder(REPO / model)
+    setting = network_entry(folder, network)["setting"]
+    sizes, space = folder.sizes(setting), folder.input_space(setting)
+    weights = load_weights(folder, network)
+    if sum(int(np.asarray(w).size) for w in weights.values()) > MAX_PARAMS:
+        pytest.skip("large network")
+    graph = build_any(folder.build(setting))
+    if not getattr(graph, "general", False):
+        pytest.skip("a linear network")
+    prog = make_program(graph, weights, Counter(), space)
+    kind = "min" if "min" in folder.name else "max"
+    boxes = boxes_for(space, kind, random.Random(network + "/boxes"), SAMPLE)
+    expected = []
+    for box in boxes:
+        label = folder.task.constant_label([tuple(r) for r in box], sizes)
+        if label is None:
+            expected.append((False, 0))
+            continue
+        c = Counter()
+        ok, _, _ = prog.run_interval([tuple(r) for r in box], int(label), c)
+        assert sum(c.by_rule.values()) == c.by_rule["interval"], "the Python interval leaf charged another category"
+        expected.append((bool(ok), c.by_rule["interval"]))
+
+    net_json, boxes_json = tmp_path / "net.json", tmp_path / "boxes.json"
+    r = subprocess.run([sys.executable, "-B", str(HERE / "export_network.py"), str(REPO), model, network, str(net_json)],
+                       capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stderr[-1000:]
+    boxes_json.write_text(json.dumps(boxes))
+    r = subprocess.run([str(CHECKER), "ginterval", str(net_json), str(boxes_json)], capture_output=True, text=True,
+                       timeout=1800)
+    assert r.returncode == 0, r.stderr[-1000:]
+    rows = [json.loads(line) for line in r.stdout.splitlines() if line.startswith("{")]
+    assert len(rows) == len(boxes)
+    for box, row, (ok, charge) in zip(boxes, rows, expected):
+        assert row["box"] == box
+        assert (row.get("verdict"), row.get("charge")) == (ok, charge), (box, row, ok, charge)

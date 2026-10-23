@@ -407,6 +407,18 @@ def runSize (D : Name) (trusted : List Name) (oleans : List String) : IO UInt32 
 
 /-! ## The closure of a checker against the allowlist -/
 
+/-- The structures projected in `e` by a primitive projection (`Expr.proj`, which names no projection
+    function), with the field index: `I.ginterval` written as such is a constant to check, but an elaborator
+    can build the same access as `Expr.proj CompactCheck.Interp i I`, and the closure check must see that too. -/
+partial def primitiveProjections (e : Expr) (acc : Array (Name × Nat) := #[]) : Array (Name × Nat) :=
+  match e with
+  | .proj s i b => primitiveProjections b (acc.push (s, i))
+  | .app f a => primitiveProjections a (primitiveProjections f acc)
+  | .lam _ t b _ | .forallE _ t b _ => primitiveProjections b (primitiveProjections t acc)
+  | .letE _ t v b _ => primitiveProjections b (primitiveProjections v (primitiveProjections t acc))
+  | .mdata _ b => primitiveProjections b acc
+  | _ => acc
+
 def runClosure (root : Name) (allowPath : String) (prot : Name) (trusted : List Name) (oleans : List String) : IO UInt32 := do
   initSearchPath (← findSysroot)
   let imports := trusted.toArray.map fun m => { module := m : Import }
@@ -439,6 +451,14 @@ def runClosure (root : Name) (allowPath : String) (prot : Name) (trusted : List 
         if ci matches .thmInfo _ then continue
         for m in ci.getUsedConstantsAsSet.toList do
           if !visited.contains m then stack := m :: stack
+        -- a primitive projection of a trusted structure counts as its projection function (the field's name)
+        for (st, i) in primitiveProjections ci.type ++ (ci.value?.map primitiveProjections |>.getD #[]) do
+          if cand.contains st then continue
+          match (getStructureFields env st)[i]? with
+          | some f =>
+            let n := st ++ f
+            if !visited.contains n then stack := n :: stack
+          | none => offending := offending.push (st ++ Name.mkSimple s!"proj{i}")
       | none =>
         match kenv.find? n with
         | some (.thmInfo _) => continue

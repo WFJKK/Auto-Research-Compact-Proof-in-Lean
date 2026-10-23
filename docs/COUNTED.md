@@ -1,4 +1,4 @@
-# The counted language (step 2 of the open lane; version 4 of the language, policy v5, 23 October)
+# The counted language (step 2 of the open lane; version 4 of the language, policy v6, 23 October)
 
 How a scored open-lane proof gets a length: its checker `D` is written against an abstract interpreter
 whose operations are the only way to touch a number of the network, the service runs it with the
@@ -21,8 +21,9 @@ A checker is a function of an interpreter:
 truth values `B`, counts `N`; `weight`, `weightShape`, `weightSize`, `cert`, `certSize`, `lit`, `zero`; `add`, `sub`, `muladd`, `neg`, `min`,
 `max`; `lt`, `le`, `eq`; `exp`; `charge`, `fail`; `btrue`, `bfalse`, `countB`, `nscale`, `selectV`,
 `bnot`, `band`, `bor`; `nzero`, `nsucc`, `nadd`, `nofNat`; and the checker's own rules as operations,
-`single` and `interval` (linear networks) and `gsingle` (any network the general checker follows, such as
-attention; below). The checker's own code is ordinary Lean on lists, `Nat` indices and strings
+`single` and `interval` (linear networks), `gsingle` (any network the general checker follows, such as
+attention; below) and `ginterval` (the interval rule on such networks, in the maximum-knowledge condition
+only; below). The checker's own code is ordinary Lean on lists, `Nat` indices and strings
 around these calls, and it has to typecheck for every `I`: so it can never look inside a value of `I.V`,
 `I.B` or `I.N`. There is no branching on a truth value: it can only become a count (`countB`, or
 `nscale k`: a concrete `k` if true), a choice between two numbers (`selectV`, charged) or another truth
@@ -58,6 +59,8 @@ charged gate. The full list of signatures is the structure itself (CountedOps.le
   rule on a box, charged `intervalCost`; both for linear networks;
 - `gsingle graph task x`: the single-input rule on a general network (attention), charged what `cost-v3`
   charges a `single` leaf of such a network (below);
+- `ginterval graph task box`: the interval rule on a general network, charged what `cost-v3` charges an
+  `interval` leaf of such a network; maximum-knowledge condition only (below);
 - loops, conditionals on `Nat`, lists and arrays, `nsucc`, `nadd`: free, as the Python checker's
   bookkeeping is free.
 
@@ -194,6 +197,40 @@ every theorem is a task, and a module of many theorems makes Lean start threads 
 address space than the box can allow (64 GB was not enough for the example's 64 facts). The constants
 built are the same.
 
+## Knowledge conditions (23 October, policy v6)
+
+An open-lane run is one of two experimental conditions, set per run (`--knowledge minimal | maximum` to the
+service; `open_lane.knowledge` in the pipeline's run config):
+
+- **minimal**: the base allowlist (`accept/allowlist.txt`). On a network with attention a checker has
+  `gsingle`, the arithmetic and comparison primitives and `exp`; any bound over a group of inputs it builds
+  and proves itself.
+- **maximum**: the base allowlist plus `accept/allowlist-maximum.txt`, the legacy lane's rules for groups of
+  inputs on general networks as operations, proved sound and priced as `cost-v3` prices the leaf: so far
+  `ginterval`. `token_interval` (on the branch `tokens`, to be rebased) and `token_convex` (not yet in Lean)
+  are to follow.
+
+The two runs differ only in what the agent is given, so their difference measures how much the agent
+depends on the supplied rules. The condition is part of the policy digest and recorded in every receipt
+(`knowledge`); a run records the service's identity under its condition and checks every receipt against
+it, so one frontier never mixes the two. In the minimal condition a checker that uses `ginterval` is
+refused scoring, also when it reaches the field without naming it: the closure check counts a primitive
+projection of a trusted structure (`Expr.proj CompactCheck.Interp i I`, which an elaborator can build) as
+the projection function of field `i` (`test_the_interval_rule_for_general_networks_is_scored_only_in_the_maximum_knowledge_condition`).
+
+`ginterval graph task box` (`CountedGeneral.lean`) runs the general checker's interval leaf
+(`generalInterval`): the one-hot input is the box (per position, the tokens `lo..hi`), its product with a
+weight matrix gives per position the smallest and largest row entry, and everything after is interval
+arithmetic; the box is certified when the label, constant on it, has a lower bound above every other
+output's upper bound. A box whose label is not constant answers false and costs nothing, as the Python
+checker never runs the rule there. The charge (`gopCostBox`): the lookup from the box, per position `d`
+for one token and `2 d (hi - lo + 1)` otherwise (`d` the matrix's columns); every other operation twice the
+single rule's price; the final comparison. Specifications: `CostM.ginterval_correct` (a true answer means
+every input of the box is answered correctly, from `generalInterval_correct`) and `CostM.ginterval_run_of`
+(for split instances). `compactcheck ginterval` prints verdict and charge per box;
+`scripts/test_gsingle_cost.py` compares both with the Python checker's interval leaf on every development
+network of the attention models (55 of 55).
+
 ## The manifest and the receipt
 
 A scored submission adds to its manifest
@@ -250,8 +287,7 @@ the bill equals the Python length to the unit and the count equals the Python co
 
 ## What stays open
 
-`interval`, `token_interval` and `token_convex` for general networks as counted operations (needed to
-reproduce the attention frontiers at their legacy price; for now an agent bounds groups of inputs with
-the arithmetic and `exp` operations itself); the input-free operations of a general network in
-`extract`; the `interval` operation with an approximation; a literal budget calibrated on more than the
+`token_interval` and `token_convex` for general networks as counted operations of the maximum-knowledge
+condition (needed to reproduce the attention frontiers at their legacy price); the input-free operations
+of a general network in `extract`; the `interval` operation with an approximation; a literal budget calibrated on more than the
 brute-force example.
