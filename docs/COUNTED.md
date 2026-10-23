@@ -156,10 +156,16 @@ certifies the input if the label's lower bound is above every other output's upp
 - indexing, transposing, reshaping, concatenating, stacking, parameters: nothing;
 - the final comparison of the label's logit with the others: (outputs - 1).
 
-Only the operations that depend on the input are charged per call. `cost-v3` charges the others once, to
-`extract`, which the open lane does not compute yet, so the service refuses scoring on a general network
-that has any (no attention network of the zoo has). `extract` for a general network is its number of
-weights, not counting the scalar constants the exporter adds (`#const`), as in `cost-v3`.
+Every operation is charged on every call. `cost-v3` charges the operations that do not depend on the input
+once, to `extract`; in the zoo's attention networks they are all structural (parameters, transposes,
+indexing), which cost nothing, so a call's charge is `cost-v3`'s single leaf exactly. The open lane does not
+compute such a once-per-proof charge yet, so the service refuses scoring on a protected network that has
+charged ones. A checker may pass `gsingle` a graph of its own, built from the protected graph's nodes, and
+there an operation on the weights alone must cost what it computes: the first version (1bd760f) left
+input-independent operations out of the bill, and a review on 23 October did 24 additions on the weights
+for 7 units through a graph of its own (`test_arithmetic_on_the_weights_in_a_graph_of_the_checkers_own_is_charged`).
+Charging every call can only overcharge. `extract` for a general network is its number of weights, not
+counting the scalar constants the exporter adds (`#const`), as in `cost-v3`.
 `scripts/test_gsingle_cost.py` compares the charge and the verdict with the Python checker's single leaf
 on every development network of the attention models; `compactcheck gsingle` prints them.
 

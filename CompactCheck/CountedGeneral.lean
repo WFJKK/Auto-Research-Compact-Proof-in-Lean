@@ -18,12 +18,16 @@ one input and charges what cost-v3 charges a single leaf of a general network (`
 - indexing, transposing, unsqueezing, expanding, concatenating, stacking, parameters: nothing;
 - the final comparison of the label's logit with every other logit: (outputs - 1).
 
-Only the operations that depend on the input are charged here; cost-v3 computes the others once per
-proof and charges them to `extract`, which the acceptance service adds to its own `extract` (they are
-none in the zoo's attention networks). The network is evaluated once per call: `gsingleRun` returns the
-verdict and the charge together, and `gsingleRun_generalSingle` relates the verdict to `generalSingle`,
-whose soundness theorem (`generalSingle_correct`) gives `CostM.gsingle_correct` in
-`CountedGeneralSound.lean`.
+Every operation is charged on every call, including those that do not depend on the input. cost-v3
+computes these once per proof and charges them to `extract`; in the zoo's attention networks they are all
+structural (parameters, transposes, indexing), which cost nothing, so the charge here is cost-v3's single
+leaf exactly, and the acceptance service refuses scoring on a protected network with charged ones. A
+checker may also pass a graph of its own, and there an operation on the weights alone must not be free:
+charging it on every call can only overcharge (a review of 23 October found the first version, which left
+input-independent operations out, doing 24 additions on the weights for 7 units). The network is evaluated
+once per call: `gsingleRun` returns the verdict and the charge together, and `gsingleRun_generalSingle`
+relates the verdict to `generalSingle`, whose soundness theorem (`generalSingle_correct`) gives
+`CostM.gsingle_correct` in `CountedGeneralSound.lean`.
 
 This file uses only core Lean.
 -/
@@ -53,29 +57,28 @@ def gopCost (g : Graph) (vals : Array GVal) (out : DT) : Op → Nat
   | .softmax _ _ => 3 * shapeSize out.shape
   | _ => 0
 
-/-- Run the operations in order, as `gevalOps` does, and add up the charge of those that depend on the
-    input (`deps`, indexed from `i`). -/
-def gcostOps (g : Graph) (w : DWeights) (input : GVal) (deps : Array Bool) :
-    List Op → Nat → Array GVal → Nat → Option (Array GVal × Nat)
-  | [], _, vals, acc => some (vals, acc)
-  | op :: ops, i, vals, acc =>
+/-- Run the operations in order, as `gevalOps` does, and add up the charge of every one of them. -/
+def gcostOps (g : Graph) (w : DWeights) (input : GVal) :
+    List Op → Array GVal → Nat → Option (Array GVal × Nat)
+  | [], vals, acc => some (vals, acc)
+  | op :: ops, vals, acc =>
     match gevalOp g w input vals op with
     | some v =>
       let c := match v.tensor with
-        | some t => if deps.getD i true then gopCost g vals t op else 0
+        | some t => gopCost g vals t op
         | none => 0
-      gcostOps g w input deps ops (i + 1) (vals.push v) (acc + c)
+      gcostOps g w input ops (vals.push v) (acc + c)
     | none => none
 
-theorem gcostOps_fst (g : Graph) (w : DWeights) (input : GVal) (deps : Array Bool) :
-    ∀ (ops : List Op) (i : Nat) (vals : Array GVal) (acc : Nat),
-      (gcostOps g w input deps ops i vals acc).map Prod.fst = gevalOps g w input ops vals
-  | [], _, _, _ => rfl
-  | op :: ops, i, vals, acc => by
+theorem gcostOps_fst (g : Graph) (w : DWeights) (input : GVal) :
+    ∀ (ops : List Op) (vals : Array GVal) (acc : Nat),
+      (gcostOps g w input ops vals acc).map Prod.fst = gevalOps g w input ops vals
+  | [], _, _ => rfl
+  | op :: ops, vals, acc => by
     simp only [gcostOps, gevalOps]
     cases hv : gevalOp g w input vals op with
     | none => rfl
-    | some v => exact gcostOps_fst g w input deps ops _ _ _
+    | some v => exact gcostOps_fst g w input ops _ _
 
 /-- The output's number of logits, for the final comparison. -/
 def logitCount (out : DT) : Nat :=
@@ -84,12 +87,12 @@ def logitCount (out : DT) : Nat :=
   | _ => 0
 
 /-- The single rule on a general network, with its cost-v3 charge: the verdict of `generalSingle` and the
-    charge of the operations that depend on the input plus the final comparison, from one evaluation. -/
+    charge of every operation plus the final comparison, from one evaluation. -/
 def gsingleRun (g : Graph) (w : DWeights) (task : Task) (x : Input) : Option (Bool × Nat) :=
   match oneHotDT g x with
   | none => none
   | some input =>
-    match gcostOps g w input (dependsOnInput g) g.nodes 0 #[] 0 with
+    match gcostOps g w input g.nodes #[] 0 with
     | none => none
     | some (vals, cost) =>
       match vals[g.output]?.bind GVal.tensor with
@@ -107,8 +110,8 @@ theorem gsingleRun_generalSingle {g : Graph} {w : DWeights} {task : Task} {x : I
   | none => simp [hi] at h
   | some input =>
     simp only [hi] at h
-    have hfst := gcostOps_fst g w input (dependsOnInput g) g.nodes 0 #[] 0
-    cases hc : gcostOps g w input (dependsOnInput g) g.nodes 0 #[] 0 with
+    have hfst := gcostOps_fst g w input g.nodes #[] 0
+    cases hc : gcostOps g w input g.nodes #[] 0 with
     | none => simp [hc] at h
     | some p =>
       obtain ⟨vals, cost⟩ := p
@@ -129,8 +132,9 @@ theorem gsingleRun_generalSingle {g : Graph} {w : DWeights} {task : Task} {x : I
 namespace CostM
 
 /-- The single rule on a general network (attention): runs the network on one input exactly, with the
-    general checker's dyadic arithmetic, and charges what cost-v3 charges a single leaf. `none` if the
-    weights are not dyadic or the general checker cannot follow the network. -/
+    general checker's dyadic arithmetic, and charges every operation it computes at cost-v3's prices
+    (on the zoo's networks, exactly what cost-v3 charges a single leaf). `none` if the weights are not
+    dyadic or the general checker cannot follow the network. -/
 def gsingle (g : Graph) (task : Task) (x : Input) : CostM Bool := ⟨fun env c =>
   match dweights env.weights with
   | none => none

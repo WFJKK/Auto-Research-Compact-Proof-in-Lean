@@ -773,3 +773,106 @@ def test_a_scored_proof_on_an_attention_network_splits_its_instance(work):
     assert s["bill"] == 64 * 191 and s["extract"] == 136 and s["read"] == 0
     assert s["length"] == 64 * 191 + 136
     assert set(s["axioms"]) <= {"propext", "Classical.choice", "Quot.sound"}
+
+
+WEIGHT_ARITH = """import Protected.N_attn_max2_tiny_v8d4_s1_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+import CompactCheck.CountedGeneralSound
+
+namespace Candidate.WeightArith
+open CompactCheck Protected.N_attn_max2_tiny_v8d4_s1_c0
+
+/-- The protected graph with two additions on the weights alone appended: U + U, then that doubled. -/
+def g2 : Graph := { graph with nodes := graph.nodes ++ [.add 24 24, .add 26 26] }
+
+def D : Checker := fun I => do
+  let _ ← I.gsingle g2 task [0, 0]
+  pure I.nzero
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  simp only [D, CostM.exec, Interp.counting_bind, Interp.counting_pure, CostM.run_bind] at h
+  split at h
+  · simp only [CostM.run_pure, Interp.counting_nzero, Option.some.injEq, Prod.mk.injEq] at h
+    omega
+  · cases h
+
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 255) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.WeightArith
+"""
+
+
+ATTN_ZERO = """import Protected.N_attn_max2_tiny_v8d4_s1_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+
+namespace Candidate.AttnZero
+open CompactCheck Protected.N_attn_max2_tiny_v8d4_s1_c0
+
+def D : Checker := fun I => pure I.nzero
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  simp only [D, CostM.exec, CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
+  omega
+
+theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, 0) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.AttnZero
+"""
+
+def zero_candidate(tmp_path: Path, name: str, lean: str, module: str, namespace: str, bill: int) -> Path:
+    """A scored candidate on the attention example's network claiming nothing: its count is 0 whatever the
+    weights, so only its bill and the service's scoring decisions are under test."""
+    d = variant(tmp_path, name, lean=lean, module_path=f"Candidate/{module}.lean", base=ATTN)
+    (d / "Candidate" / "AttnTinyScored.lean").unlink()
+    m = json.loads((d / "manifest.json").read_text())
+    m.update(claimed_count=0, theorem=f"{namespace}.performance", modules=[f"Candidate/{module}.lean"],
+             scored={"checker": f"{namespace}.D", "sound": f"{namespace}.D_sound", "instance": f"{namespace}.D_instance",
+                     "certificate": [], "claimed_bill": bill})
+    (d / "manifest.json").write_text(json.dumps(m))
+    return d
+
+
+def test_arithmetic_on_the_weights_in_a_graph_of_the_checkers_own_is_charged(work, tmp_path):
+    """Review of 23 October: `gsingle` left out of its bill the operations that do not depend on the input, and
+    a checker may pass a graph of its own built from the protected graph's nodes, so arithmetic on the weights
+    alone was free (the reviewer's submission did 24 such additions for 7 units). Every operation is charged on
+    every call now: the protected graph's forward pass (191) and the two additions appended, 32 entries each."""
+    d = zero_candidate(tmp_path, "weight-arith", WEIGHT_ARITH, "WeightArith", "Candidate.WeightArith", 255)
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 0, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored" and s["bill"] == 191 + 2 * 32, s
+
+
+def test_a_network_with_charged_operations_on_the_weights_alone_is_refused_scoring(tmp_path):
+    """cost-v3 charges a general network's operations that do not depend on the input once per proof, to
+    extract; the open lane does not compute that charge yet, so the service refuses scoring on such a network
+    (the proof stays verified). The zoo has none, so the test exports the example's network, appends one
+    (the unembedding added to itself) and places it where the service caches exported networks."""
+    work = tmp_path / "work"
+    (work / "networks").mkdir(parents=True)
+    net_json = work / "networks" / "attn_max2_tiny-v8d4-s1.json"
+    r = subprocess.run([sys.executable, "-B", str(HERE / "export_network.py"), str(REPO), "tests/attn_max2_tiny",
+                        "attn_max2_tiny-v8d4-s1", str(net_json)], capture_output=True, text=True, timeout=1800)
+    assert r.returncode == 0, r.stderr[-1000:]
+    net = json.loads(net_json.read_text())
+    unembed = [i for i, op in enumerate(net["graph"]["nodes"]) if op.get("op") == "param" and op.get("weight") == "U"]
+    assert unembed, "the example's network has no unembedding weight U"
+    net["graph"]["nodes"].append({"op": "binary", "fn": "add", "left": unembed[0], "right": unembed[0], "name": "extra"})
+    net_json.write_text(json.dumps(net))
+    d = zero_candidate(tmp_path, "attn-zero", ATTN_ZERO, "AttnZero", "Candidate.AttnZero", 0)
+    r = submit(d, work)
+    assert r["status"] == "accepted" and r["certified_count"] == 0, r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "refused" and "do not depend on the input" in s["reason"], s
+    assert s["extract"] is None and s["size_budget"] is None

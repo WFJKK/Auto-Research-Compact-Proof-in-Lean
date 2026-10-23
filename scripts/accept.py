@@ -567,8 +567,14 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     read = len(scored["certificate"])
     out = {"status": None, "reason": None, "assurance": ASSURANCE, "cost_model": COST_MODEL,
            "bill": None, "extract": extract, "read": read, "length": None,
-           "description_size": None, "size_budget": size_budget(extract), "general_kernel_ms": None,
-           "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS, "rest_kernel_ms": None, "axioms": None}
+           "description_size": None, "size_budget": None if extract is None else size_budget(extract),
+           "general_kernel_ms": None, "general_kernel_budget_ms": GENERAL_KERNEL_BUDGET_MS, "rest_kernel_ms": None,
+           "axioms": None}
+    if extract is None:
+        # a property of the network, not of the candidate: refused before any check of the candidate's checker
+        out.update(status="refused", reason="the network has operations that do not depend on the input and cost "
+                   "something; cost-v3 charges them to extract once, which the open lane does not compute yet")
+        return out
     read_extra = [str(toolchain_root(lean)), str(LEAN_PROJECT)] + lp_all
     # the checker touches numbers only through the counted primitives
     cmd = [str(acceptcheck_binary()), "closure", scored["checker"], str(ALLOWLIST), prot["module"]] + trusted + ["--"] + oleans
@@ -577,10 +583,6 @@ def score(scored: dict, manifest: dict, prot: dict, net_json: Path, trusted: lis
     last = last_json(chk["stdout"])
     if chk["timed_out"] or chk["rc"] != 0 or last is None:
         raise Infra(f"acceptcheck closure failed: {(chk['stdout'] + chk['stderr'])[-1500:]}")
-    if extract is None:
-        out.update(status="refused", reason="the network has operations that do not depend on the input and cost "
-                   "something; cost-v3 charges them to extract once, which the open lane does not compute yet")
-        return out
     if last.get("status") != "ok":
         out.update(status="refused", reason="the checker uses constants outside the counted language: "
                    + ", ".join(last.get("offending") or []) + (f" ({last['reason']})" if last.get("reason") else ""))

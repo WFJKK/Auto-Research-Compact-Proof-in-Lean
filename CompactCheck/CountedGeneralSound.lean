@@ -4,10 +4,10 @@ import CompactCheck.CountedGeneral
 /-!
 # The soundness of the counted single rule on general networks
 
-A run of `CostM.gsingle g task x` that answers `true` means the network answers `x` correctly, in the real
-semantics of the specification (`Correct`, with the real exponential): the verdict is `generalSingle`'s
-(`gsingleRun_generalSingle`), and `generalSingle_correct` (GeneralSound.lean) is the general checker's
-soundness theorem for a single leaf.
+A run of `CostM.gsingle g task x` that answers `true` means the network answers `x` correctly, in
+the real semantics of the specification (`Correct`, with the real exponential): the verdict is
+`generalSingle`'s (`gsingleRun_generalSingle`), and `generalSingle_correct` (GeneralSound.lean) is
+the general checker's soundness theorem for a single leaf.
 -/
 
 namespace CompactCheck

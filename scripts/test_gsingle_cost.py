@@ -5,9 +5,9 @@
 `CostM.gsingle` (CountedGeneral.lean) runs one input through an attention network and bills it; the
 Python checker's single leaf (core/check/general.py, `GeneralProgram.run_singles`) is the reference. For
 every development network of the pipeline's attention models, on its first and last input and a few
-chosen at random, `compactcheck gsingle` must give the Python checker's verdict and its charge exactly
-(the operations that depend on the input plus the final comparison; the input-free ones are charged to
-extract, which the acceptance service adds).
+chosen at random, `compactcheck gsingle` must give the Python checker's verdict and its charge exactly.
+`gsingle` charges every operation on every call; cost-v3 charges the operations that do not depend on the
+input once, to extract, but on these networks they are all structural (free), so the two agree.
 
 Needs `lake build compactcheck`, the pipeline repository (next to this one, or COMPACT_PROOF_REPO) with its
 trained zoo, and its Python environment. Networks are exported into a temporary folder.
@@ -20,7 +20,6 @@ import os
 import random
 import subprocess
 import sys
-from itertools import product
 from pathlib import Path
 
 import pytest
@@ -71,9 +70,9 @@ def test_gsingle_charges_what_the_python_single_leaf_charges(model, network, tmp
         pytest.skip("a linear network: the linear single rule is tested elsewhere")
     prog = make_program(graph, weights, Counter(), space)
 
-    everything = [list(x) for x in product(*[range(v) for v in space])]
+    # sampled directly: the space of a four-position network at 64 tokens has 16.8 million inputs
     rng = random.Random(network)
-    chosen = [everything[0], everything[-1]] + rng.sample(everything, min(SAMPLE, len(everything)))
+    chosen = [[0] * len(space), [v - 1 for v in space]] + [[rng.randrange(v) for v in space] for _ in range(SAMPLE)]
     expected = []
     for x in chosen:
         c = Counter()
