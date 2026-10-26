@@ -3,9 +3,11 @@
 (examples/open_lane/attn_max2_tiny_tokens): the maximum-knowledge condition's `I.gtokenIntervals` on a list
 of boxes, the instance split into one kernel-decided theorem per leaf.
 
-    python3 scripts/gen_attn_tokens_example.py <network.json> <boxes.json> <module name suffix> <out dir> <model>
+    python3 scripts/gen_attn_tokens_example.py <network.json> <boxes.json> <module name suffix> <out dir> <model> [<what>]
 
 <model> is the network's model folder in the pipeline repository (tests/attn_max2_tiny), for the manifest.
+<what> is a sentence for the module's header saying what the boxes are (default: the full partition of
+examples/open_lane/attn_max2_tiny_tokens); a demonstration on a few boxes says so here.
 
 The boxes are the checker's leaves: no two may share an input, and each must lie in the input space (the
 soundness proof decides both). `compactcheck gtokens` gives each leaf's verdict, charge and requests for
@@ -22,11 +24,16 @@ HERE = Path(__file__).resolve().parent
 CHECKER = HERE.parent / ".lake" / "build" / "bin" / "compactcheck"
 
 net_path, boxes_path, suffix, out_dir, model = sys.argv[1], sys.argv[2], sys.argv[3], Path(sys.argv[4]), sys.argv[5]
+WHAT_FULL = ("boxes that cover the input space: for each largest token `m`, the inputs with `m` at the first position and\n"
+             "at most `m` at the second, and those with `m` at the second and less than `m` at the first. Each box has a\n"
+             "constant label, the rule keeps each input's value exactly along the one position that varies, and the rows\n"
+             "that depend on their token alone (the embeddings and their products with the weights) are computed and\n"
+             "charged once for all the boxes, which is why one call takes them all.")
+what = sys.argv[6] if len(sys.argv) > 6 else WHAT_FULL
 net = json.loads(Path(net_path).read_text())
 boxes = json.loads(Path(boxes_path).read_text())
 positions, values = net["graph"]["positions"], net["graph"]["values"]
 n_inputs = values ** positions
-prot = "N_" + re.sub(r"[^A-Za-z0-9]", "_", net["network"]) + f"_c{n_inputs}"
 name = f"Candidate.{suffix}"
 
 out = subprocess.run([str(CHECKER), "gtokens", net_path, boxes_path], capture_output=True, text=True, check=True)
@@ -43,6 +50,8 @@ for r in leaves:
             size *= hi - lo + 1
         count += size
 bill = total["token_interval"] + total["tables"]
+# the protected module's name carries the claimed count (and a certificate's hash, none here)
+prot = "N_" + re.sub(r"[^A-Za-z0-9]", "_", net["network"]) + f"_c{count}"
 
 
 def lean_box(b):
@@ -75,11 +84,7 @@ import CompactCheck.CountedGeneralSound
 
 The maximum-knowledge condition's token_interval rule (`I.gtokenIntervals`: the general checker's
 token_interval leaf on each box, charged as cost-v3 charges a proof's token_interval leaves) on {len(leaves)}
-boxes that cover the input space: for each largest token `m`, the inputs with `m` at the first position and
-at most `m` at the second, and those with `m` at the second and less than `m` at the first. Each box has a
-constant label, the rule keeps each input's value exactly along the one position that varies, and the rows
-that depend on their token alone (the embeddings and their products with the weights) are computed and
-charged once for all the boxes, which is why one call takes them all.
+{what}
 
 Soundness: the rule's verdicts (`CostM.gtokenIntervals_correct`), and the count of the inputs of the
 boxes answered `true`, which is at most the number answered correctly because no two boxes share an input

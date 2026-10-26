@@ -999,6 +999,23 @@ def test_a_scored_proof_with_token_interval_leaves_splits_its_instance_per_leaf(
     assert s["length"] == 9904 + 136
 
 
+DEMOS = ["attn_min2_tiny_tokens_demo", "attn_max2_tiny_tokens_demo", "attn_max4_tiny_tokens_demo", "attn_min4_tiny_tokens_demo"]
+
+
+@pytest.mark.parametrize("demo", DEMOS)
+def test_the_token_interval_demonstrations_are_scored_under_the_maximum_condition(work, demo):
+    """The worked examples a maximum-condition run shows its agent: three boxes of the other task's network
+    (a complete proof of the run's own network would be a proof handed over; docs/OPEN_LANE.md). Each is
+    accepted and scored at the count and bill its manifest claims."""
+    d = PROJECT / "examples" / "open_lane" / demo
+    m = json.loads((d / "manifest.json").read_text())
+    r = submit(d, work, knowledge="maximum")
+    assert r["status"] == "accepted", r["reason"]
+    assert r["certified_count"] == m["claimed_count"] and r["execution_assurance"] == "kernel_checked_instance"
+    s = r["scoring"]
+    assert s["status"] == "scored" and s["bill"] == m["scored"]["claimed_bill"], s
+
+
 def test_the_knowledge_condition_is_part_of_the_policy_digest():
     """A run records the service's identity under its condition and checks every receipt against it, so one
     frontier never mixes the conditions."""
