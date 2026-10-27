@@ -426,6 +426,80 @@ def test_option_overrides_in_the_candidate_do_not_reach_the_service(work, tmp_pa
     assert r["status"] == "accepted" and r["scoring"]["status"] == "scored" and r["scoring"]["length"] == 4112, r
 
 
+LONG_BILL = """import Protected.N_max2_tiny_v8_s0_c0
+import CompactCheck.Soundness
+import CompactCheck.CountedOps
+
+namespace Candidate.LongBill
+open CompactCheck Protected.N_max2_tiny_v8_s0_c0
+
+/-- One multiply-add per index, on the embedding's 32 entries in turn: one charge each. -/
+def macs (I : Interp) (acc : I.V) : List Nat → I.M I.V
+  | [] => pure acc
+  | i :: is => do
+    let x ← I.weight "embedding.weight" (i % 32)
+    let acc' ← I.muladd "mac" acc x x
+    macs I acc' is
+
+def body (I : Interp) (xs : List Nat) : I.M I.N := do
+  let _ ← macs I I.zero xs
+  pure I.nzero
+
+def D : Checker := fun I => body I (List.range @K@)
+
+/-- For every list of indices, so that checking soundness never evaluates the run on the concrete one. -/
+theorem body_zero (env : Env) (xs : List Nat) (c : Cost) (n : Nat) (c' : Cost)
+    (h : (body Interp.counting xs).run env c = some (n, c')) : n = 0 := by
+  simp only [body, Interp.counting_bind, Interp.counting_pure, CostM.run_bind] at h
+  split at h
+  · simp only [CostM.run_pure, Option.some.injEq, Prod.mk.injEq] at h
+    exact h.1.symm
+  · cases h
+
+theorem D_sound : ∀ (w : Weights ℚ) (c : Cert) (n : Nat) (cost : Cost),
+    CostM.exec (D Interp.counting) ⟨w, c⟩ = some (n, cost) → n ≤ numCorrect graph w task := by
+  intro w c n cost h
+  have hD : D Interp.counting = body Interp.counting (List.range @K@) := rfl
+  rw [CostM.exec, hD] at h
+  have := body_zero ⟨w, c⟩ (List.range @K@) [] n cost h
+  omega
+
+@OPTION@theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (0, @K@) := by decide +kernel
+
+theorem performance : Target := Nat.zero_le _
+
+end Candidate.LongBill
+"""
+
+
+def long_bill(tmp_path: Path, name: str, k: int, option: str) -> Path:
+    """A scored candidate on the tiny linear network claiming nothing, whose checker makes k one-unit charges."""
+    d = variant(tmp_path, name, lean=LONG_BILL.replace("@OPTION@", option).replace("@K@", str(k)),
+                module_path="Candidate/LongBill.lean", base=SCORED)
+    (d / "Candidate" / "Max2TinyScored.lean").unlink()
+    m = json.loads((d / "manifest.json").read_text())
+    m.update(claimed_count=0, theorem="Candidate.LongBill.performance", modules=["Candidate/LongBill.lean"],
+             scored={"checker": "Candidate.LongBill.D", "sound": "Candidate.LongBill.D_sound",
+                     "instance": "Candidate.LongBill.D_instance", "certificate": [], "claimed_bill": k})
+    (d / "manifest.json").write_text(json.dumps(m))
+    return d
+
+
+def test_a_long_bill_is_one_decided_instance_with_the_recursion_limit_raised(work, tmp_path):
+    """27 October: Lean's default recursion limit (maxRecDepth 512) stops `decide +kernel` on a bill of a few
+    thousand charges, which the bill's list of `Cost.add` builds one charge at a time; the open lane's first
+    attention pilot built a model of its checker and run lemmas to get past it. The option raises the limit
+    while the candidate compiles; the service's replay does not need it. 5,000 one-unit charges: rejected
+    without the option, accepted and scored with it (bill 5,000, extract 80)."""
+    r = submit(long_bill(tmp_path, "long-bill-default", 5000, ""), work)
+    assert r["status"] == "rejected" and "deep recursion" in r["reason"], r
+    r = submit(long_bill(tmp_path, "long-bill-raised", 5000, "set_option maxRecDepth 1000000 in\n"), work)
+    assert r["status"] == "accepted", r["reason"]
+    s = r["scoring"]
+    assert s["status"] == "scored", s["reason"]
+    assert s["bill"] == 5000 and s["length"] == 5000 + 80
+
+
 def test_a_candidate_cannot_change_its_sources_during_evaluation(work, tmp_path):
     """The sources the service compiles are its own copy, read-only in the box: a candidate that tries to
     rewrite them while compiling fails to compile, and the copy is what was submitted."""

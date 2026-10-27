@@ -145,6 +145,32 @@ bill. The description-size budget bounds the free structure around it; it is a b
 bill are both kernel-checked for the exact checker, certificate and weights; nothing of a candidate is ever
 executed by the service.
 
+## The instance in one theorem: Lean's recursion limit (27 October)
+
+`decide +kernel` makes the kernel run the counting interpreter on the protected weights, so the instance
+needs no lemma about the bill and no model of the checker. Lean's default recursion limit
+(`maxRecDepth`, 512) stops that evaluation once the bill has a few thousand charges: the bill is built one
+`Cost.add` at a time and evaluated at the end, and the kernel reports `(kernel) deep recursion detected,
+use set_option maxRecDepth <num> to increase the limit` (a test checker of one-unit charges passed at
+2,000 and failed at 3,000). The option applies while the candidate is compiled; the service's replay
+(`Kernel.Environment.replay`) does not apply it and accepts the proof. So a candidate writes
+
+    set_option maxRecDepth 1000000 in
+    theorem D_instance : CostM.billed (D Interp.counting) ⟨weights, cert⟩ = some (n, L) := by
+      decide +kernel
+
+Through the service, a checker of 5,000 one-unit charges is rejected without the option and accepted with
+it in 23 s (`test_a_long_bill_is_one_decided_instance_with_the_recursion_limit_raised`); one of 30,000 was
+accepted in 70 s; the compile of one of 60,000 was killed at over 4 GB on a machine of 7 GB (memory, below). The first open-lane pilot on the tiny
+attention network (26 October) built an exact-rational model of its checker and run lemmas to get past this
+limit, at the cost of rounds; the option makes that unnecessary. Splitting (below) is the way past memory,
+not past the recursion limit.
+
+A soundness proof can meet the same evaluation: a `simp` or `split` on the run of `D` with its concrete list
+of inputs can leave the kernel a term whose check evaluates that run (the test checker's first soundness
+proof failed this way). The test states its lemma for every list of indices and reaches
+`D Interp.counting` through a `rfl` equation and `rw`, as the examples do.
+
 ## Attention networks: the general single rule and split instances (23 October)
 
 `single` runs the linear checker; on a network with attention its cost function has no price for softmax
